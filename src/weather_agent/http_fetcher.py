@@ -1,4 +1,7 @@
-"""weather_core Fetcher on Micronaut's HTTP client.
+"""weather_core Fetchers on Micronaut's HTTP client, one client ("service") per upstream.
+
+Each upstream gets its own `micronaut.http.services.<id>` configuration (pool, timeouts, TLS), so one host's
+limits and quirks don't leak into the others.
 
 Python can't start threads here, so parallelism comes from the client itself: a batch of requests is started
 through the async API, then each result is awaited in turn. Batches bound both concurrency and the number of
@@ -19,6 +22,7 @@ from java.util.concurrent import TimeUnit
 from micronaut.context.annotation import Value
 from micronaut.http import HttpRequest
 from micronaut.http.client import HttpClient
+from micronaut.http.client.annotation import Client
 from weather_core.sources.base import Download, SourceError
 
 log = logging.getLogger(__name__)
@@ -33,10 +37,22 @@ class UpstreamError(SourceError):
 
 
 @Singleton
-class MicronautFetcher:
-    def __init__(self, client: HttpClient,
+class Fetchers:
+    """One Fetcher per upstream service."""
+
+    def __init__(self,
+                 ecmwf: Annotated[HttpClient, Client("ecmwf")],
+                 dwd: Annotated[HttpClient, Client("dwd")],
+                 nominatim: Annotated[HttpClient, Client("nominatim")],
                  user_agent: Annotated[str, Value("${weather.user-agent:weather-agent/0.1 (personal use)}")],
                  max_connections: Annotated[int, Value("${weather.max-connections:8}")]):
+        self.ecmwf = MicronautFetcher(ecmwf, user_agent, max_connections)
+        self.dwd = MicronautFetcher(dwd, user_agent, max_connections)
+        self.nominatim = MicronautFetcher(nominatim, user_agent, 1)  # one request at a time anyway
+
+
+class MicronautFetcher:
+    def __init__(self, client: HttpClient, user_agent: str, max_connections: int):
         self.client = client.toAsync()
         self.user_agent = user_agent
         self.batch = max_connections

@@ -103,9 +103,13 @@ class OutsideRegion(ValueError):
 
 
 class UnstructuredGrid:
-    """Grid given by cell-centre coordinates (ICON). Nearest-cell lookup via a coarse bucket index."""
+    """Grid given by cell-centre coordinates (ICON). Nearest-cell lookup via a coarse bucket index.
 
-    def __init__(self, lat: np.ndarray, lon: np.ndarray, region: Region | None = None, bucket_deg: float = 0.25):
+    Points whose nearest cell is farther than `max_km` lie outside a regional model's domain.
+    """
+
+    def __init__(self, lat: np.ndarray, lon: np.ndarray, region: Region | None = None, bucket_deg: float = 0.25,
+                 max_km: float | None = None):
         lat = np.asarray(lat, dtype=np.float64)
         lon = (np.asarray(lon, dtype=np.float64) + 180.0) % 360.0 - 180.0
         if region is not None:
@@ -118,6 +122,7 @@ class UnstructuredGrid:
         self.lat = lat[keep]
         self.lon = lon[keep]
         self.bucket_deg = bucket_deg
+        self.max_km = max_km
         keys = self._key(self.lat, self.lon)
         order = np.argsort(keys, kind="stable")
         self._sorted_keys = keys[order]
@@ -150,5 +155,8 @@ class UnstructuredGrid:
             if candidates.size == 0:
                 raise OutsideRegion("point outside the model domain")
             d2 = (self.lat[candidates] - la) ** 2 + ((self.lon[candidates] - lo) * np.cos(np.radians(la))) ** 2
-            nearest[i] = candidates[np.argmin(d2)]
+            best = int(np.argmin(d2))
+            if self.max_km is not None and np.sqrt(d2[best]) * 111.2 > self.max_km:
+                raise OutsideRegion("point outside the model domain")
+            nearest[i] = candidates[best]
         return Interpolation(nearest[None, :], np.ones((1, lat.size)))

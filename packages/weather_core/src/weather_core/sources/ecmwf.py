@@ -20,7 +20,8 @@ from ..grid import EUROPE, Crop, Region, RegularGrid
 from ..budget import DownloadBudget
 from ..store import FieldStore
 from ..timeaxis import OutsideForecast
-from .base import Decoder, Download, Fetcher, Prepared, Query, SourceError, SourceSamples, sampling_for
+from .base import (NEEDS, Decoder, Download, Fetcher, Prepared, Query, SourceError, SourceSamples, sampling_for,
+                   step_list, with_previous)
 
 log = logging.getLogger(__name__)
 
@@ -50,14 +51,6 @@ class MissingParameter(SourceError):
     def __init__(self, model: str, param: str, step: int):
         super().__init__(f"{model}: parameter {param} missing at +{step}h")
         self.param = param
-
-# Which base variables each catalogue variable needs.
-NEEDS = {
-    "precip": {"precip"}, "snow": {"snow"}, "radiation": {"radiation"}, "t2m": {"t2m"}, "td2m": {"td2m"},
-    "rh": {"t2m", "td2m"}, "wind": {"wind_u", "wind_v"}, "wind_dir": {"wind_u", "wind_v"},
-    "headwind": {"wind_u", "wind_v"}, "crosswind": {"wind_u", "wind_v"},
-    "feels_like": {"t2m", "td2m", "wind_u", "wind_v"}, "gust": {"gust"}, "cloud": {"cloud"}, "cape": {"cape"},
-}
 
 
 @dataclass(frozen=True)
@@ -158,7 +151,7 @@ class EcmwfSource:
                 sampling = sampling_for(query, run, steps)
             except OutsideForecast:
                 continue
-            last_step = steps[max(_with_previous(sampling.needed_steps()))]
+            last_step = steps[max(with_previous(sampling.needed_steps()))]
             if self._index(run, last_step) is not None:
                 return run
         raise SourceError(f"{self.model.model}: no published run covers this time")
@@ -207,7 +200,7 @@ class EcmwfSource:
             size = sum(b - a + 1 for download, _ in plans.values() for a, b in download.ranges)
             params = sorted({e["_canonical"] for _, wanted in plans.values() for e in wanted})
             log.info("%s run %s: fetching %d step(s) %s, params %s, %.1f MB", self.name, run.strftime("%Y-%m-%d %HZ"),
-                     len(plans), _step_list(sorted(plans)), ",".join(params), size / 1e6)
+                     len(plans), step_list(sorted(plans)), ",".join(params), size / 1e6)
             if self.budget is not None:
                 self.budget.reserve(size)
             written = sum(self.fetcher.download_many([download for download, _ in plans.values()]))
@@ -252,7 +245,7 @@ class EcmwfSource:
             by_step: dict[int, set[str]] = {}
             for name, idxs in needed.items():
                 param, kind = PARAMS[name]
-                for i in (_with_previous(idxs) if kind == "accum" else idxs):
+                for i in (with_previous(idxs) if kind == "accum" else idxs):
                     by_step.setdefault(steps[i], set()).add(param)
             try:
                 downloaded += self._ensure_all(run, by_step)
@@ -294,17 +287,6 @@ class EcmwfSource:
             # Evicted by a concurrent newer run; fetch it again once.
             self._ensure_all(run, {step: {param}})
             return self.store.get(self.name, run, param, step)
-
-
-def _step_list(steps: list[int]) -> str:
-    """'+0h…+24h' style summary, or the full list when short."""
-    if len(steps) <= 6:
-        return ", ".join(f"+{s}h" for s in steps)
-    return f"+{steps[0]}h…+{steps[-1]}h"
-
-
-def _with_previous(indices: Collection[int]) -> set[int]:
-    return set(indices) | {i - 1 for i in indices if i > 0}
 
 
 def _merge(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:

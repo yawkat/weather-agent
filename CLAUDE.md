@@ -1,6 +1,6 @@
 # weather-agent
 
-MCP server answering weather questions from open ensemble forecasts (ECMWF IFS/AIFS ENS; DWD ICON planned).
+MCP server answering weather questions from open ensemble forecasts (ECMWF IFS/AIFS ENS; DWD ICON-EU-EPS, ICON-D2-EPS, ICON-D2-RUC-EPS).
 Agents query per-member samples with DuckDB SQL through one `forecast` tool.
 
 ## Layout

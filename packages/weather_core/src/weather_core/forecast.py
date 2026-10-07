@@ -4,12 +4,14 @@ import logging
 import math
 import traceback
 from collections.abc import Sequence
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
 import numpy as np
 
+from .budget import DownloadBudget
 from .cube import CubeData, ModelEntry, QueryEngine, QueryError, referenced_variables
 from .geometry import LatLon, area_points, decode_polyline, encode_polyline, parse_gpx, sample_route, simplify
 from .grid import OutsideRegion
@@ -63,8 +65,9 @@ def _attempt(source: Source, problems: list[dict], fn):
 
 class Forecaster:
     def __init__(self, sources: Sequence[Source], engine: QueryEngine, default_tz: str = "Europe/Berlin",
-                 clock=lambda: datetime.now(timezone.utc)):
+                 clock=lambda: datetime.now(timezone.utc), budget: DownloadBudget | None = None):
         self.sources = list(sources)
+        self.budget = budget  # the one the sources reserve from; a query's sources share its per-query limit
         self.engine = engine
         self.default_tz = ZoneInfo(default_tz)
         self.clock = clock
@@ -199,10 +202,11 @@ class Forecaster:
 
         problems: list[dict] = []
         prepared: list[tuple[Source, Prepared]] = []
-        for source in selected:
-            p = _attempt(source, problems, lambda: source.prepare(query, variables))
-            if p is not None:
-                prepared.append((source, p))
+        with self.budget.query() if self.budget is not None else nullcontext():
+            for source in selected:
+                p = _attempt(source, problems, lambda: source.prepare(query, variables))
+                if p is not None:
+                    prepared.append((source, p))
 
         cube = CubeData(variables, windows, query.lat, query.lon, distance_km, kind, tz, models=[],
                         place_names=place_names)

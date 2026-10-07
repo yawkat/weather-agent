@@ -152,6 +152,8 @@ from Python. Tests: `tests/test_duckdb_spike.py`.
 
 - GraalPy crash on `np.frombuffer(memoryview(ByteBuffer))`: https://github.com/oracle/graalpython/issues/1198
 - Micronaut `PemParser` rejects distro CA bundles: https://github.com/micronaut-projects/micronaut-core/issues/13782
+- Micronaut HTTP/2 client advertises no flow-control window, so downloads from opendata.dwd.de (h2) run at
+  ~1.5 MB/s; the DWD client is pinned to HTTP/1.1: https://github.com/micronaut-projects/micronaut-core/issues/13798
 - Pyronaut:
   - Flyway classpath migrations in the fat JAR: https://github.com/micronaut-projects/pyronaut/issues/329
   - stale `__micronaut_java_imports_*.py` after incremental processing: https://github.com/micronaut-projects/pyronaut/issues/330
