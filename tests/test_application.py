@@ -63,3 +63,31 @@ def test_fetcher_timeout(my_context):
         assert time.monotonic() - started < 5  # two 0.5 s waits plus 1 s backoff
     finally:
         socket.close()
+
+
+def test_mcp_path_without_key(my_context):
+    """No key in the test config: MCP answers at /mcp (through the /mcp{/key} route) and nothing below it."""
+    import java
+
+    from micronaut.runtime.server import EmbeddedServer
+
+    server = my_context.getBean(EmbeddedServer)
+    if not server.isRunning():
+        server.start()
+    HttpClient = java.type("java.net.http.HttpClient")
+    HttpRequest = java.type("java.net.http.HttpRequest")
+    URI = java.type("java.net.URI")
+    client = HttpClient.newHttpClient()
+    body = '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+    def post(path):
+        request = (HttpRequest.newBuilder(URI.create(f"http://localhost:{server.getPort()}{path}"))
+                   .header("Content-Type", "application/json")
+                   .header("Accept", "application/json, text/event-stream")
+                   .POST(HttpRequest.BodyPublishers.ofString(body)).build())
+        return client.send(request, java.type("java.net.http.HttpResponse").BodyHandlers.ofString())
+
+    response = post("/mcp")
+    assert response.statusCode() == 200, response.body()
+    assert "forecast" in response.body()
+    assert post("/mcp/" + "k" * 40).statusCode() == 404
