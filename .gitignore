@@ -1,4 +1,4 @@
-# Bulky local data (model cache, dev Postgres). var/.nobackup keeps it out of restic backups.
+# Bulky local data (model cache). var/.nobackup keeps it out of restic backups.
 var/*
 !var/.nobackup
 
