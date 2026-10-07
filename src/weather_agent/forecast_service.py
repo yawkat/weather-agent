@@ -6,10 +6,11 @@ from jakarta.inject import Singleton
 from micronaut.context.annotation import Value
 from weather_core.budget import DownloadBudget
 from weather_core.forecast import Forecaster
+from weather_core.sources.dwd import ICON_D2_EPS, ICON_D2_RUC_EPS, ICON_EU_EPS, DwdIconSource
 from weather_core.sources.ecmwf import AIFS_ENS, IFS_ENS, EcmwfSource
 from weather_core.store import FieldStore
 
-from .http_fetcher import MicronautFetcher
+from .http_fetcher import Fetchers
 from .java_io import JavaDecoder
 from .sql_engine import DuckDbEngine
 
@@ -21,11 +22,12 @@ class ForecastService:
     """Builds the forecast engine from configuration; tools call into `forecaster`."""
 
     def __init__(self,
-                 fetcher: MicronautFetcher,
+                 fetchers: Fetchers,
                  engine: DuckDbEngine,
                  cache_dir: Annotated[str, Value("${weather.cache-dir:var/cache}")],
                  default_tz: Annotated[str, Value("${weather.timezone:Europe/Berlin}")],
                  ecmwf_base_url: Annotated[str, Value("${weather.ecmwf.base-url:`https://data.ecmwf.int/forecasts`}")],
+                 dwd_base_url: Annotated[str, Value("${weather.dwd.base-url:`https://opendata.dwd.de/weather/nwp/v1/m`}")],
                  max_mb_per_query: Annotated[int, Value("${weather.download.max-mb-per-query:4000}")],
                  max_mb_per_hour: Annotated[int, Value("${weather.download.max-mb-per-hour:20000}")]):
         decoder = JavaDecoder()
@@ -36,9 +38,12 @@ class ForecastService:
             log.info("downloaded %s run %s: %.1f MB", source, run.strftime("%Y-%m-%d %H:%MZ"), size / 1e6)
 
         sources = [
-            EcmwfSource(IFS_ENS, fetcher, decoder, store, base_url=ecmwf_base_url, on_download=log_download,
+            EcmwfSource(IFS_ENS, fetchers.ecmwf, decoder, store, base_url=ecmwf_base_url, on_download=log_download,
                         budget=budget),
-            EcmwfSource(AIFS_ENS, fetcher, decoder, store, base_url=ecmwf_base_url, on_download=log_download,
+            EcmwfSource(AIFS_ENS, fetchers.ecmwf, decoder, store, base_url=ecmwf_base_url, on_download=log_download,
                         budget=budget),
+            *(DwdIconSource(model, fetchers.dwd, decoder, store, base_url=dwd_base_url, on_download=log_download,
+                            budget=budget)
+              for model in (ICON_D2_RUC_EPS, ICON_D2_EPS, ICON_EU_EPS)),
         ]
         self.forecaster = Forecaster(sources, engine, default_tz=default_tz)

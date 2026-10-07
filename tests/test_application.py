@@ -36,13 +36,13 @@ def test_fetcher_reports_error_status(my_context):
     """A non-200, non-404 answer (here GET /mcp on our own server) is an UpstreamError naming the status."""
     from micronaut.runtime.server import EmbeddedServer
 
-    from weather_agent.http_fetcher import MicronautFetcher, UpstreamError
+    from weather_agent.http_fetcher import Fetchers, UpstreamError
 
     server = my_context.getBean(EmbeddedServer)
     if not server.isRunning():
         server.start()
     with pytest.raises(UpstreamError, match=r"HTTP [45]\d\d"):
-        my_context.getBean(MicronautFetcher).get(f"http://localhost:{server.getPort()}/mcp")
+        my_context.getBean(Fetchers).nominatim.get(f"http://localhost:{server.getPort()}/mcp")
 
 
 def test_fetcher_timeout(my_context):
@@ -51,15 +51,15 @@ def test_fetcher_timeout(my_context):
 
     import java
 
-    from weather_agent.http_fetcher import MicronautFetcher, UpstreamError
+    from weather_agent.http_fetcher import Fetchers, UpstreamError
 
     InetAddress = java.type("java.net.InetAddress")
     socket = java.type("java.net.ServerSocket")(0, 50, InetAddress.getLoopbackAddress())
     try:
         started = time.monotonic()
         with pytest.raises(UpstreamError, match=r"no response within 0\.5 s"):
-            my_context.getBean(MicronautFetcher).get(f"http://127.0.0.1:{socket.getLocalPort()}/search",
-                                                     timeout_s=0.5, attempts=2)
+            my_context.getBean(Fetchers).nominatim.get(f"http://127.0.0.1:{socket.getLocalPort()}/search",
+                                                       timeout_s=0.5, attempts=2)
         assert time.monotonic() - started < 5  # two 0.5 s waits plus 1 s backoff
     finally:
         socket.close()

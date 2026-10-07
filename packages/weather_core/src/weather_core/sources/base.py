@@ -35,6 +35,9 @@ class Decoder(Protocol):
     def decode(self, path: str) -> list[np.ndarray]:
         """Values of every GRIB message in the file, in file order, flattened, float32 (NaN = missing)."""
 
+    def decode_files(self, paths: list[str]) -> list[np.ndarray]:
+        """Like `decode`, for several files at once (decoded in parallel, if the implementation can)."""
+
 
 @dataclass(frozen=True)
 class Query:
@@ -114,3 +117,23 @@ def assemble(query: Query, sampling: StepSampling, base_per_step: dict[str, dict
     bearing = query.bearing if query.is_route else None
     variables = derive(arrays, bearing=bearing)
     return Samples(variables, sampling.dt_hours, has_space=query.area, unavailable=set(unavailable))
+
+
+# Which base variables each catalogue variable needs.
+NEEDS = {
+    "precip": {"precip"}, "snow": {"snow"}, "radiation": {"radiation"}, "t2m": {"t2m"}, "td2m": {"td2m"},
+    "rh": {"t2m", "td2m"}, "wind": {"wind_u", "wind_v"}, "wind_dir": {"wind_u", "wind_v"},
+    "headwind": {"wind_u", "wind_v"}, "crosswind": {"wind_u", "wind_v"},
+    "feels_like": {"t2m", "td2m", "wind_u", "wind_v"}, "gust": {"gust"}, "cloud": {"cloud"}, "cape": {"cape"},
+}
+
+
+def step_list(steps: list[int]) -> str:
+    """'+0h…+24h' style summary, or the full list when short."""
+    if len(steps) <= 6:
+        return ", ".join(f"+{s}h" for s in steps)
+    return f"+{steps[0]}h…+{steps[-1]}h"
+
+
+def with_previous(indices: Collection[int]) -> set[int]:
+    return set(indices) | {i - 1 for i in indices if i > 0}

@@ -25,16 +25,35 @@ url = '${WEATHER_GEOCODER_URL:`https://nominatim.openstreetmap.org`}'
 path = '${WEATHER_CA_BUNDLE:`/etc/ssl/certs/ca-certificates.crt`}'
 format = 'PEM'
 
-[micronaut.http.client]
+# One client per upstream (http_fetcher.Fetchers). Request URLs are absolute, so `url` is only a default.
+[micronaut.http.services.ecmwf]
+url = 'https://data.ecmwf.int'
 read-timeout = '5m'
-max-content-length = 104857600  # 100 MiB: whole DWD GRIB files; ECMWF range responses are ~1 MB
+max-content-length = 104857600  # 100 MiB; range responses are ~1 MB
 follow-redirects = true
+ssl.trust-name = 'system-ca'
+pool.max-concurrent-http1-connections = 8
 
-[micronaut.http.client.ssl]
-trust-name = 'system-ca'
+[micronaut.http.services.dwd]
+url = 'https://opendata.dwd.de'
+read-timeout = '5m'
+max-content-length = 104857600  # 100 MiB; per-member GRIB files are ~1 MB
+follow-redirects = true
+ssl.trust-name = 'system-ca'
+# opendata.dwd.de negotiates HTTP/2, and Micronaut's HTTP/2 client advertises no flow-control window: the server
+# may send only 64 KiB per round trip on the one shared connection, ~1.5 MB/s in total. HTTP/1.1 over 8
+# connections gets ~50 MB/s. https://github.com/micronaut-projects/micronaut-core/issues/13798
+alpn-modes = ['http/1.1']
+pool.max-concurrent-http1-connections = 8
 
-[micronaut.http.client.pool]
-max-concurrent-http1-connections = 8
+[micronaut.http.services.nominatim]
+url = 'https://nominatim.openstreetmap.org'
+read-timeout = '30s'  # GeocodeService also bounds each wait (weather.geocoder.timeout-seconds)
+max-content-length = 1048576  # 1 MiB; search results are a few kB
+follow-redirects = true
+ssl.trust-name = 'system-ca'
+# Requests are one at a time, but a timed-out attempt may still hold its connection while the retry runs.
+pool.max-concurrent-http1-connections = 2
 
 [micronaut.mcp.server]
 transport = 'HTTP'
