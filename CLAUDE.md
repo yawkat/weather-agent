@@ -9,8 +9,10 @@ Agents query per-member samples with DuckDB SQL through one `forecast` tool.
   member installed editable into the venv, because the Pyronaut processor would otherwise generate Java for every
   class (pyronaut#331).
 - `src/weather_agent/`: Micronaut/MCP glue (tools, fetcher on Micronaut's HTTP client, DuckDB engine).
-- `src-java/at/yawk/weatheragent/`: Java helpers where performance or interop needs them (GRIB decoding, DuckDB
-  loading, Host/Origin filter, GraalPy native access).
+- `src-java/at/yawk/weatheragent/`: Java helpers where performance or interop needs them (GRIB decoding, running
+  the SQL worker, Host/Origin filter, GraalPy native access).
+- `sql-worker/`: the CPython script that runs client SQL on DuckDB inside bwrap (not GraalPy; see
+  `docs/security.md`). `nix develop` exports its interpreter and store closure; tests run it for real.
 - `nix/`: pure Nix build (venv from `uv.lock`, downloads as a fixed-output derivation, offline JAR build,
   `weather-agent` wrapper) and a VM
   test (`checks.x86_64-linux.vm`). Hosts (goliath) define the systemd unit themselves; `nix/test.nix` shows one.
@@ -27,7 +29,8 @@ Agents query per-member samples with DuckDB SQL through one `forecast` tool.
 - Never run several `nix build` / `nix flake check` commands concurrently.
 - Don't run `pyronaut` in this directory while a `pyronaut dev` is running here: they share `__pyronaut__/`.
   Use a copy of the project instead.
-- Python code can't start threads. Java exceptions need `except BaseException` (pyronaut#335).
+- Python code can't start threads. Java exceptions need `except BaseException` (pyronaut#335). `np.save`/`tofile`
+  fail (no file descriptors in GraalPy's Java posix backend); write `tobytes()`.
 - Prefer Python over Java unless performance or interop requires Java.
 - Bulky local data lives under `var/` (excluded from backups via `var/.nobackup`).
 

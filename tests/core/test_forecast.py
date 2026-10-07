@@ -151,7 +151,7 @@ def test_failing_source_does_not_fail_the_answer():
 @pytest.mark.parametrize("sql, fragment", [
     ("SELECT nonsense FROM per_member", "Binder Error"),
     ("SELECT * FROM read_csv('/etc/passwd')", "disabled by configuration"),
-    ("COPY (SELECT 1) TO '/tmp/claude-1000/escape.csv'", "disabled by configuration"),
+    ("COPY (SELECT 1) TO '/tmp/claude-1000/escape.csv'", "only SELECT statements"),
 ])
 def test_sql_errors_are_readable(sql, fragment):
     with pytest.raises(QueryError) as error:

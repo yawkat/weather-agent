@@ -107,6 +107,10 @@
 
 ## DuckDB as the query engine (spike, 2026-10-07): works
 
+> Superseded the same day: DuckDB no longer runs in the server. Client SQL runs in a sandboxed CPython worker
+> with the duckdb Python package (`sql-worker/`, `docs/security.md`), because DuckDB's `memory_limit` doesn't
+> bound everything and a native crash took the server down. The JDBC notes below are kept for reference.
+
 `org.duckdb:duckdb_jdbc:1.5.6.0` (MIT), used from Java (`src-java/at/yawk/weatheragent/SqlCube.java`) and called
 from Python. Tests: `tests/test_duckdb_spike.py`.
 
