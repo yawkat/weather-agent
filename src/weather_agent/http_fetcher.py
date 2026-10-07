@@ -15,6 +15,7 @@ from jakarta.inject import Singleton
 from java.nio import ByteBuffer
 from java.nio.channels import FileChannel
 from java.nio.file import Path, StandardOpenOption
+from java.util.concurrent import TimeUnit
 from micronaut.context.annotation import Value
 from micronaut.http import HttpRequest
 from micronaut.http.client import HttpClient
@@ -40,11 +41,15 @@ class MicronautFetcher:
         self.user_agent = user_agent
         self.batch = max_connections
 
-    def get(self, url: str) -> bytes | None:
-        """Body of a small text resource, or None on 404."""
-        status, body = self._exchange([self._request(url, None)], STRING)[0]
+    def get(self, url: str, user_agent: str | None = None, timeout_s: float | None = None,
+            attempts: int = ATTEMPTS) -> bytes | None:
+        """Body of a small text resource, or None on 404. `timeout_s` bounds the wait for each attempt, below the
+        client's read timeout (sized for GRIB files)."""
+        status, body = self._exchange([self._request(url, None, user_agent)], STRING, timeout_s, attempts)[0]
         if status == 404:
             return None
+        if status != 200:
+            raise UpstreamError(f"{url}: HTTP {status}")
         return str(body).encode()
 
     def download_many(self, requests: list[Download]) -> list[int]:
@@ -88,17 +93,19 @@ class MicronautFetcher:
                  sum(written) / 1e6 / max(elapsed, 1e-3))
         return written
 
-    def _request(self, url: str, byte_range: tuple[int, int] | None):
-        request = HttpRequest.GET(url).header("User-Agent", self.user_agent)
+    def _request(self, url: str, byte_range: tuple[int, int] | None, user_agent: str | None = None):
+        request = HttpRequest.GET(url).header("User-Agent", user_agent or self.user_agent)
         if byte_range is not None:
             request = request.header("Range", f"bytes={byte_range[0]}-{byte_range[1]}")
         return request
 
-    def _exchange(self, requests: list, body_type) -> list[tuple[int, object]]:
-        """Run requests concurrently; (status, body) each. Retries 429, 5xx and network errors with backoff."""
+    def _exchange(self, requests: list, body_type, timeout_s: float | None = None,
+                  attempts: int = ATTEMPTS) -> list[tuple[int, object]]:
+        """Run requests concurrently; (status, body) each. Retries 429, 5xx, network errors and timeouts with
+        backoff. `timeout_s` bounds each wait for a response; the abandoned request is cancelled."""
         results: list[tuple[int, object] | None] = [None] * len(requests)
         pending = list(range(len(requests)))
-        for attempt in range(ATTEMPTS):
+        for attempt in range(attempts):
             if attempt:
                 time.sleep(2 ** (attempt - 1))
             futures = {i: (self.client.exchange(requests[i]) if body_type is None
@@ -107,21 +114,26 @@ class MicronautFetcher:
             retry = []
             for i, future in futures.items():
                 try:
-                    response = future.get()
+                    response = (future.get() if timeout_s is None
+                                else future.get(int(timeout_s * 1000), TimeUnit.MILLISECONDS))
                     results[i] = (response.code(), _body(response, body_type))
                 except BaseException as e:  # Java exceptions are foreign, not Python Exceptions
                     if isinstance(e, (KeyboardInterrupt, SystemExit, GeneratorExit)):
                         raise
                     status = _status_of(e)
+                    if _is_timeout(e):
+                        future.cancel(True)
+                        problem = f"no response within {timeout_s:g} s"
+                    else:
+                        problem = _describe(e, status)
                     if status is not None and status < 500 and status != 429:
                         results[i] = (status, None)  # definitive, e.g. 404
-                    elif attempt == ATTEMPTS - 1:
-                        log.error("giving up on %s after %d attempts: %s", requests[i].getUri(), ATTEMPTS,
-                                  _describe(e, status))
-                        raise UpstreamError(f"{requests[i].getUri()}: {_describe(e, status)}") from None
+                    elif attempt == attempts - 1:
+                        log.error("giving up on %s after %d attempts: %s", requests[i].getUri(), attempts, problem)
+                        raise UpstreamError(f"{requests[i].getUri()}: {problem}") from None
                     else:
                         log.warning("retrying %s (attempt %d of %d): %s", requests[i].getUri(), attempt + 2,
-                                    ATTEMPTS, _describe(e, status))
+                                    attempts, problem)
                         retry.append(i)
             pending = retry
             if not pending:
@@ -140,6 +152,13 @@ def _body(response, body_type):
             body.release()  # …and give it back
         except BaseException:
             pass
+
+
+def _is_timeout(e) -> bool:
+    try:
+        return str(e.getClass().getName()) == "java.util.concurrent.TimeoutException"
+    except BaseException:
+        return False
 
 
 def _status_of(e) -> int | None:
