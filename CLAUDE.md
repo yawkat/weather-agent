@@ -10,7 +10,7 @@ Agents query per-member samples with DuckDB SQL through one `forecast` tool.
   class (pyronaut#331).
 - `src/weather_agent/`: Micronaut/MCP glue (tools, fetcher on Micronaut's HTTP client, DuckDB engine).
 - `src-java/at/yawk/weatheragent/`: Java helpers where performance or interop needs them (GRIB decoding, DuckDB
-  loading, Host/Origin filter, GraalPy native access).
+  loading, Host/Origin and secret-path filters, GraalPy native access).
 - `nix/`: pure Nix build (venv from `uv.lock`, downloads as a fixed-output derivation, offline JAR build,
   `weather-agent` wrapper) and a VM
   test (`checks.x86_64-linux.vm`). Hosts (goliath) define the systemd unit themselves; `nix/test.nix` shows one.

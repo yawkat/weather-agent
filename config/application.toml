@@ -13,6 +13,10 @@ max-request-size = 6291456  # 6 MiB
 [weather]
 # Host names (and Origin hosts) /mcp accepts; protects against DNS rebinding from browsers (McpHostFilter).
 allowed-hosts = '${WEATHER_ALLOWED_HOSTS:`localhost,127.0.0.1,::1`}'
+# Secret path: with a key set, MCP is only at /mcp/<key> (McpKeyFilter). Deployments use the file (e.g. a systemd
+# credential); the key must be 32+ characters of base64url.
+access-key = '${WEATHER_ACCESS_KEY:}'
+access-key-file = '${WEATHER_ACCESS_KEY_FILE:}'
 
 [weather.geocoder]
 # Public Nominatim: ≤1 request/s, identifying User-Agent, results cached in memory. Point this at a
@@ -57,6 +61,8 @@ pool.max-concurrent-http1-connections = 2
 
 [micronaut.mcp.server]
 transport = 'HTTP'
+# /mcp, or /mcp/<access key>. The key segment is a template variable so routing doesn't compare it; McpKeyFilter does.
+endpoint = '/mcp{/key}'
 
 [micronaut.mcp.server.info]
 name = 'weather-agent'
