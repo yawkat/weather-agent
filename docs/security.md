@@ -7,8 +7,8 @@ measures limit what a caller (anyone who has the URL, or an LLM steered by untru
 
 With an access key configured (`WEATHER_ACCESS_KEY_FILE`, or `WEATHER_ACCESS_KEY` for development), MCP is served
 only at `/mcp/<key>`; `/mcp` and wrong keys get a 404 (`McpKeyFilter`). Without a key, MCP is at `/mcp` and the
-server logs a warning. A configured key file that is empty or holds an invalid key stops startup. Set a key on
-any instance reachable from the internet.
+server logs a warning. Only empty settings mean "no key": a whitespace-only setting, an empty key file or an
+invalid key stops startup (the filter is created eagerly). Set a key on any instance reachable from the internet.
 
 - Generate it with `openssl rand -base64 32 | tr '+/' '-_' | tr -d '='` (32–256 base64url characters are
   accepted). Pass the file as a systemd credential (`LoadCredential=`, `WEATHER_ACCESS_KEY_FILE=%d/…`), not via

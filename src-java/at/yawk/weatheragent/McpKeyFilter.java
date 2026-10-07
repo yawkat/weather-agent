@@ -1,5 +1,6 @@
 package at.yawk.weatheragent;
 
+import io.micronaut.context.annotation.Context;
 import io.micronaut.context.annotation.Value;
 import io.micronaut.core.annotation.Nullable;
 import io.micronaut.http.HttpRequest;
@@ -7,9 +8,9 @@ import io.micronaut.http.HttpResponse;
 import io.micronaut.http.annotation.RequestFilter;
 import io.micronaut.http.annotation.ServerFilter;
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.regex.Pattern;
@@ -22,7 +23,10 @@ import org.slf4j.LoggerFactory;
  * <p>
  * The route is the template {@code /mcp{/key}}, so routing never compares against the key; this filter does, in
  * constant time. Wrong or missing keys get a 404, like any unknown path.
+ * <p>
+ * {@code @Context}: filters are created on the first request otherwise, so a bad key would only show up then.
  */
+@Context
 @ServerFilter({"/mcp", "/mcp/**"})
 public final class McpKeyFilter {
     private static final Logger LOG = LoggerFactory.getLogger(McpKeyFilter.class);
@@ -42,25 +46,25 @@ public final class McpKeyFilter {
         }
     }
 
+    /**
+     * The key, or null when both settings are empty (the defaults). Any other value must yield a valid key: a
+     * whitespace-only setting or an empty key file (placeholder, failed decryption) fails instead of opening MCP.
+     */
     static byte @Nullable [] load(String key, String keyFile) {
-        if (!keyFile.isBlank()) {
-            if (!key.isBlank()) {
-                throw new IllegalStateException("set weather.access-key or weather.access-key-file, not both");
-            }
+        if (key.isEmpty() && keyFile.isEmpty()) {
+            return null;
+        }
+        if (!key.isEmpty() && !keyFile.isEmpty()) {
+            throw new IllegalStateException("set weather.access-key or weather.access-key-file, not both");
+        }
+        if (!keyFile.isEmpty()) {
             try {
                 key = Files.readString(Path.of(keyFile), StandardCharsets.UTF_8);
-            } catch (IOException e) {
-                throw new UncheckedIOException("cannot read weather.access-key-file", e);
+            } catch (IOException | InvalidPathException e) {
+                throw new IllegalStateException("cannot read weather.access-key-file", e);
             }
         }
         key = key.strip();
-        if (key.isEmpty()) {
-            if (!keyFile.isBlank()) {
-                // Fail closed: an empty secret (placeholder, failed decryption) mustn't open the server.
-                throw new IllegalStateException("weather.access-key-file is empty");
-            }
-            return null;
-        }
         if (!KEY.matcher(key).matches()) {
             // Don't echo the key: it may be a real secret with a typo.
             throw new IllegalStateException(

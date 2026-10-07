@@ -39,13 +39,21 @@ def test_key_from_file_is_stripped():
 
 
 def test_empty_key_file_fails_closed():
+    """A placeholder or failed decryption leaves an empty credential: that must not open MCP."""
     with tempfile.NamedTemporaryFile("w", suffix=".key", delete=False) as out:
         out.write(" \n")
     try:
-        with pytest.raises(BaseException, match="is empty"):
+        with pytest.raises(BaseException, match="access key must be"):
             McpKeyFilter("", out.name)
     finally:
         os.unlink(out.name)
+
+
+@pytest.mark.parametrize("key, key_file", [(" ", ""), ("\n", ""), ("", " "), ("", "\t")])
+def test_whitespace_settings_fail_closed(key, key_file):
+    """Only empty settings (the defaults) mean "no key"; anything else must be a valid key."""
+    with pytest.raises(BaseException, match="access key must be|cannot read"):
+        McpKeyFilter(key, key_file)
 
 
 @pytest.mark.parametrize("key", ["short", "x" * 31, KEY + "/", KEY + "%2F", "ü" * 40])

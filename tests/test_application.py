@@ -91,3 +91,14 @@ def test_mcp_path_without_key(my_context):
     assert response.statusCode() == 200, response.body()
     assert "forecast" in response.body()
     assert post("/mcp/" + "k" * 40).statusCode() == 404
+
+
+def test_bad_access_key_stops_startup():
+    """McpKeyFilter is created at startup, so a bad key fails the context without any request."""
+    import java
+
+    ApplicationContext = java.type("io.micronaut.context.ApplicationContext")
+    properties = java.type("java.util.HashMap")()
+    properties.put("weather.access-key", "too-short")
+    with pytest.raises(BaseException, match="access key must be"):
+        ApplicationContext.builder().environments("test").properties(properties).start().close()
