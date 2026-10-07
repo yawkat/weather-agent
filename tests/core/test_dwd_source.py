@@ -204,6 +204,20 @@ def test_download_budget_uses_listed_sizes(tmp_path):
     assert not [u for u in source.server.urls if "/TOT_PREC/" in u]
 
 
+def test_grid_download_is_budgeted_and_counted(tmp_path):
+    # CLAT and CLON are listed at 1000 bytes each: 2 kB is more than this allows.
+    source = make(tmp_path, budget=DownloadBudget(per_request_bytes=1500, per_hour_bytes=10**9))
+    with pytest.raises(SourceError, match="per-query limit"):
+        source.samples(window(24, 1), ["t2m"])
+    assert source.server.urls == []
+
+    source = make(tmp_path / "b")
+    first = source.samples(window(24, 1), ["t2m"]).bytes_downloaded
+    grid_bytes = len(b"CLAT|1|0") + len(b"CLON|1|0")
+    fields = source.samples(window(30, 1), ["t2m"]).bytes_downloaded  # same number of fields, grid cached
+    assert first == fields + grid_bytes
+
+
 def test_changed_grid_is_fetched_again(tmp_path):
     source = make(tmp_path)
     source.samples(window(3, 1), ["t2m"])

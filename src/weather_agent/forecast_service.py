@@ -46,4 +46,4 @@ class ForecastService:
                             budget=budget)
               for model in (ICON_D2_RUC_EPS, ICON_D2_EPS, ICON_EU_EPS)),
         ]
-        self.forecaster = Forecaster(sources, engine, default_tz=default_tz)
+        self.forecaster = Forecaster(sources, engine, default_tz=default_tz, budget=budget)

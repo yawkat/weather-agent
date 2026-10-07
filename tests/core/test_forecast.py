@@ -57,6 +57,19 @@ class Broken:
         raise RuntimeError("connection reset")
 
 
+class Downloading(Synthetic):
+    """Reserves `nbytes` from a download budget before answering, like a source with data to fetch."""
+
+    def __init__(self, name, budget, nbytes):
+        super().__init__(name)
+        self.budget = budget
+        self.nbytes = nbytes
+
+    def prepare(self, query, variables):
+        self.budget.reserve(self.nbytes)
+        return super().prepare(query, variables)
+
+
 class _Forecaster(Forecaster):
     """Test shorthands for the common location forms."""
 
@@ -67,6 +80,21 @@ class _Forecaster(Forecaster):
 def forecaster(*sources):
     return _Forecaster(list(sources) or [Synthetic()], DuckDbEngine(512, 2, 10000, 500), default_tz="UTC",
                        clock=lambda: RUN)
+
+
+def test_sources_of_one_query_share_the_per_query_download_limit():
+    from weather_core.budget import DownloadBudget
+
+    budget = DownloadBudget(per_request_bytes=100, per_hour_bytes=10**6)
+    sources = [Downloading("a", budget, 60), Downloading("b", budget, 60)]
+    f = _Forecaster(sources, DuckDbEngine(512, 2, 10000, 500), default_tz="UTC", clock=lambda: RUN, budget=budget)
+    sql = "SELECT model, count(*) AS n FROM per_member GROUP BY model"
+    answer = f.point(50.0, 7.0, "2026-10-08T10:00", "2026-10-08T12:00", sql)
+    assert [m["model"] for m in answer["models"]] == ["a"]
+    assert answer["unavailable_sources"][0]["source"] == "b"
+    assert "per-query limit" in answer["unavailable_sources"][0]["reason"]
+    # The next query has its own allowance.
+    assert [m["model"] for m in f.point(50.0, 7.0, "2026-10-08T10:00", "2026-10-08T12:00", sql)["models"]] == ["a"]
 
 
 def rows(answer):

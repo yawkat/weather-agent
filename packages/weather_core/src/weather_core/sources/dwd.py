@@ -154,10 +154,11 @@ class DwdIconSource:
         return f"{self._dir(run, param, member)}PT{step:03d}H00M.grib2"
 
     def _listing(self, run: datetime, param: str) -> dict[int, int]:
-        """Hourly steps of a parameter published for both the first and the last member → file size.
+        """Hourly steps of a parameter published for both the first and the last member → the larger file size.
 
         A step reaches the members over about half a minute, mostly from the last member down to the first (member
-        01 was last in every upload checked), so a step the last member has may still 404 for the others.
+        01 was last in every upload checked), so a step the last member has may still 404 for the others. Sizes
+        serve as the download estimate; members differ by about 1%.
         """
         key = (run, param)
         cached = self._listings.get(key)
@@ -172,7 +173,8 @@ class DwdIconSource:
                 break
             published = set(self.model.steps()) if sizes is None else sizes.keys()
             listed = {int(step): int(size) for step, size in _LISTING.findall(body.decode(errors="replace"))}
-            sizes = {step: size for step, size in listed.items() if step in published}
+            sizes = {step: max(size, sizes[step] if sizes else 0) for step, size in listed.items()
+                     if step in published}
         self._listings[key] = (time.monotonic(), sizes)
         return sizes or {}
 
@@ -208,29 +210,36 @@ class DwdIconSource:
         # Outside the per-source run directories, which the store evicts.
         return self.store.root / "_grids" / f"{self.name}.f32"
 
-    def grid(self, run: datetime) -> UnstructuredGrid:
+    def _ensure_grid(self, run: datetime) -> int:
+        """Load the grid into `self._grid`, fetching it on first use; bytes downloaded."""
         if self._grid is not None:
-            return self._grid
+            return 0
         path = self._grid_path()
-        if not path.exists():
-            self._fetch_grid(run, path)
+        written = self._fetch_grid(run, path) if not path.exists() else 0
         with open(path, "rb") as f:
             coords = np.frombuffer(f.read(), dtype="<f4")
         lat, lon = coords[:coords.size // 2], coords[coords.size // 2:]
         self._grid = UnstructuredGrid(lat, lon, region=self.region, max_km=self.model.max_km)
         self._grid_points = lat.size
-        return self._grid
+        return written
 
-    def _fetch_grid(self, run: datetime, path: Path) -> None:
+    def _fetch_grid(self, run: datetime, path: Path) -> int:
         path.parent.mkdir(parents=True, exist_ok=True)
+        params = ("CLAT", "CLON")
+        sizes = [self._listing(run, param).get(0) for param in params]
+        if None in sizes:
+            raise SourceError(f"{self.model.model}: grid coordinates of run {run:%Y-%m-%d %HZ} are not published")
+        reservation = self.budget.reserve(sum(sizes)) if self.budget is not None else None
         downloads = []
-        for param in ("CLAT", "CLON"):
+        for param in params:
             fd, tmp = tempfile.mkstemp(suffix=".grib2", dir=self.store.root)
             os.close(fd)
             downloads.append(Download(self._url(run, param, 1, 0), None, tmp))
         try:
             log.info("%s: fetching grid coordinates from run %s", self.name, run.strftime("%Y-%m-%d %HZ"))
-            self.fetcher.download_many(downloads)
+            written = sum(self.fetcher.download_many(downloads))
+            if reservation is not None:
+                self.budget.settle(reservation, written)
             fields = self.decoder.decode_files([d.dest for d in downloads])
         finally:
             for d in downloads:
@@ -248,6 +257,7 @@ class DwdIconSource:
         finally:
             if os.path.exists(tmp):
                 os.unlink(tmp)
+        return written
 
     def _forget_grid(self) -> None:
         """DWD changed the grid (fields no longer match it): fetch it again next time."""
@@ -271,15 +281,19 @@ class DwdIconSource:
         log.info("%s run %s: fetching %d field(s) at %s, params %s, ~%.1f MB", self.name,
                  run.strftime("%Y-%m-%d %HZ"), len(groups), step_list(sorted({s for s, _ in groups})),
                  ",".join(params), size / 1e6)
-        if self.budget is not None:
-            self.budget.reserve(size)
+        grid_bytes = self._ensure_grid(run)  # normally loaded by prepare() already
+        reservation = self.budget.reserve(size) if self.budget is not None else None
         per_batch = max(1, _FILES_PER_BATCH // self.model.members)
         written = 0
-        for i in range(0, len(groups), per_batch):
-            written += self._fetch_groups(run, groups[i:i + per_batch])
+        try:
+            for i in range(0, len(groups), per_batch):
+                written += self._fetch_groups(run, groups[i:i + per_batch])
+        finally:
+            if reservation is not None:
+                self.budget.settle(reservation, written)
         if written and self.on_download is not None:
             self.on_download(self.name, run, written)
-        return written
+        return written + grid_bytes
 
     def _fetch_groups(self, run: datetime, groups: list[tuple[int, str]]) -> int:
         members = range(1, self.model.members + 1)
@@ -291,7 +305,7 @@ class DwdIconSource:
                     os.close(fd)
                     downloads.append(Download(self._url(run, param, member, step), None, path))
             written = sum(self.fetcher.download_many(downloads))
-            grid = self.grid(run)
+            grid = self._grid
             for g, (step, param) in enumerate(groups):
                 paths = [d.dest for d in downloads[g * len(members):(g + 1) * len(members)]]
                 fields = self.decoder.decode_files(paths)
@@ -323,7 +337,8 @@ class DwdIconSource:
         run = self.find_run(query, params)
         steps = self.model.steps()
         sampling = sampling_for(query, run, steps)
-        interp = self.grid(run).interpolation(query.lat, query.lon)
+        downloaded = self._ensure_grid(run)
+        interp = self._grid.interpolation(query.lat, query.lon)
 
         needed = {name: self._step_indices(name, sampling) for name in base_vars}
         by_step: dict[int, set[str]] = {}
@@ -335,7 +350,7 @@ class DwdIconSource:
                     if kind in ("accum", "avg") and steps[j] == 0:
                         continue  # totals and means since the start are zero there
                     by_step.setdefault(steps[j], set()).update(self._params(name))
-        downloaded = self._ensure_all(run, by_step)
+        downloaded += self._ensure_all(run, by_step)
 
         base_per_step: dict[str, dict[int, np.ndarray]] = {}
         for name, idxs in needed.items():
