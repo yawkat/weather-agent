@@ -66,18 +66,44 @@
   - v1 layout: `nwp/v1/m/icon-d2-ruc-eps/p/CLAT/`
 - Decode them with the same code path. `hsurf` gives model orography for elevation adjustment.
 
-## Packaging (spike 0.4): partially done
+## Packaging (spike 0.4): done, pure Nix build (`nix/`)
 
-- The fat JAR (~109 MB) runs on plain Nix `graalvm-ce` `java -jar` with a clean environment.
+- The fat JAR (~207 MB) runs on plain Nix `graalvm-ce` `java -jar` with a clean environment.
 - **No GraalPy interpreter is needed at runtime.** `VIRTUAL_ENV` only needs:
   - `lib/python3.13/site-packages/`
   - `pyvenv.cfg`
   - any executable `bin/python`; it's never run, but GraalPy uses it to find the venv
+- Python packages outside `src/` (`weather_core`, numpy, tzdata) aren't in the JAR; they come from the venv.
 - Native wheels need their ELF RPATHs patched (`libstdc++.so.6`). In Nix, use `autoPatchelfHook`.
 - Pyronaut's build tools (`pyronaut-processor`, `pyronaut-jar-build`, …) are JVM shell scripts, not native
-  binaries. Only the `pyronaut-dev`/`pyronaut-run*` launchers are native.
-- Still open: building the JAR inside a fixed-output derivation. It needs Pyronaut setup, a GraalPy that passes
-  Pyronaut's venv check, and Maven downloads, all in the sandbox.
+  binaries. Only the `pyronaut-dev`/`pyronaut-run*` launchers are native. `pyronaut setup` still downloads them
+  (~1.6 GB) to read their classpath descriptors, but the JAR build never runs them.
+- **Build split:** a fixed-output derivation (`nix/deps.nix`) runs `pyronaut setup` and `pyronaut install` with
+  network access and keeps `~/.pyronaut` and `~/.m2`. The JAR (`nix/jar.nix`) is then built offline with
+  `pyronaut install --offline` and `pyronaut build --jar --offline`, so code changes need no hash update. The JAR
+  is reproducible as is: every entry is dated 1980-01-01.
+  - Pyronaut's Java tools take `~/.pyronaut` and `~/.m2` from `user.home`, which comes from passwd, not `$HOME`.
+    Set `JAVA_TOOL_OPTIONS=-Duser.home=$HOME`, or they write to the real home (or fail on `/homeless-shelter`).
+  - Setup accepts a GraalPy already in `~/.pyronaut/sdks/graalpy3.13-25.4.4/`. The upstream tarball needs
+    `autoPatchelfHook` to run in the sandbox (`nix/graalpy.nix`); nixpkgs' `graalpy` is older (25.2).
+  - Setup fetches the native launchers through the GitHub API by default, whose unauthenticated rate limit (60/h)
+    fails builds. `[native-images] base-url = "https://github.com/micronaut-projects/pyronaut/releases/download/v0.1.0/"`
+    in `~/.pyronaut/settings.toml` downloads them directly.
+  - `pyronaut install` creates or uses `.venv` and runs `pip install` for the declared requirements, which fails
+    (no pip, `weather-core` isn't on PyPI, no network). It skips pip when `.venv/.pyronaut-requirements.json`
+    lists the same requirements. The build creates `.venv` with GraalPy, copies in the Nix venv's packages and
+    writes that marker with Pyronaut's own functions.
+  - Making the downloads reproducible (`nix/normalize-deps.py`): drop lock files, resolver bookkeeping, the
+    `#<date>` lines of `.properties` files and the editor stubs (`~/.pyronaut/ide-stubs`, whose overload
+    parameter names vary between runs); rename the tools directory (`<hash>-<random UUID>`); copy the JARs Pyronaut
+    symlinks from the CLI's store path; replace `$HOME` and the JDK path with placeholders. The ~1.6 GB of native
+    launchers are only checked for existence and their classpath descriptors, so they become stubs.
+- **Runtime:** GraalPy and Truffle extract native libraries (`libpython-native.so`, `libtruffleattach.so`) to
+  `~/.cache/org.graalvm.polyglot` and `dlopen` them, so the service's home must be writable and not `noexec`. With
+  systemd `DynamicUser=`, the `StateDirectory` is an idmapped `noexec` mount; that needs `ExecPaths=` for it (seen
+  in the VM test), so a plain system user is simpler.
+- **Runtime venv** (`nix/venv.nix`): built from `uv.lock` by unpacking wheels, without running Python. The GraalPy
+  wheel index publishes no hashes, so their hashes are pinned in `nix/venv.nix`.
 
 ## DuckDB as the query engine (spike, 2026-10-07): works
 
@@ -136,3 +162,14 @@ from Python. Tests: `tests/test_duckdb_spike.py`.
   - Java exceptions not caught by `except Exception`: https://github.com/micronaut-projects/pyronaut/issues/335
   - `host-class-lookup` can't allow `byte[]`: https://github.com/micronaut-projects/pyronaut/issues/336
   - validate-config rejects `'6MB'` for `@ReadableBytes`: https://github.com/micronaut-projects/pyronaut/issues/337
+- Pyronaut, from the Nix packaging (2026-10-07):
+  - dependency lock file with checksums: https://github.com/micronaut-projects/pyronaut/issues/340
+  - setup downloads native launchers for JVM-only projects: https://github.com/micronaut-projects/pyronaut/issues/341
+  - `install` can't use a uv-managed venv: https://github.com/micronaut-projects/pyronaut/issues/342
+  - Java tools use `user.home` instead of `$HOME`: https://github.com/micronaut-projects/pyronaut/issues/343
+  - setup/install output isn't reproducible: https://github.com/micronaut-projects/pyronaut/issues/344
+  - setup state hardcodes absolute paths and symlinks: https://github.com/micronaut-projects/pyronaut/issues/345
+  - configurable GraalPy executable: https://github.com/micronaut-projects/pyronaut/issues/346
+  - GitHub API rate limit during setup: https://github.com/micronaut-projects/pyronaut/issues/347
+  - bundle the venv into the fat JAR: https://github.com/micronaut-projects/pyronaut/issues/348
+  - `--progress off` doesn't silence the nested installer: https://github.com/micronaut-projects/pyronaut/issues/349

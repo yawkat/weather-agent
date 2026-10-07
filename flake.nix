@@ -15,8 +15,85 @@
         import nixpkgs {
           inherit system;
         };
+      version = (builtins.fromTOML (builtins.readFile ./pyproject.toml)).project.version;
+      # Only what the JAR build reads, so docs and Nix edits don't change its inputs.
+      fs = nixpkgs.lib.fileset;
+      src = fs.toSource {
+        root = ./.;
+        fileset = fs.unions [
+          ./pyproject.toml
+          ./uv.lock
+          ./micronaut-cli.yml
+          ./config
+          ./packages
+          ./src
+          ./src-java
+        ];
+      };
+      # The venv only depends on the lock file and the workspace packages it installs.
+      venvSrc = fs.toSource {
+        root = ./.;
+        fileset = fs.unions [
+          ./uv.lock
+          ./packages
+        ];
+      };
     in
     {
+      packages = forAllSystems (
+        pkgs:
+        let
+          graalvm-ce = pkgs.graalvmPackages.graalvm-ce;
+          graalpy = pkgs.callPackage ./nix/graalpy.nix { };
+          pyronaut-cli = pkgs.callPackage ./nix/pyronaut-cli.nix { };
+          venv = pkgs.callPackage ./nix/venv.nix { src = venvSrc; };
+          deps = pkgs.callPackage ./nix/deps.nix {
+            inherit
+              src
+              graalvm-ce
+              graalpy
+              pyronaut-cli
+              venv
+              ;
+          };
+          jar = pkgs.callPackage ./nix/jar.nix {
+            inherit
+              src
+              version
+              graalvm-ce
+              pyronaut-cli
+              deps
+              ;
+          };
+          weather-agent = pkgs.callPackage ./nix/package.nix {
+            inherit
+              version
+              graalvm-ce
+              jar
+              venv
+              ;
+          };
+        in
+        {
+          inherit
+            graalpy
+            pyronaut-cli
+            deps
+            jar
+            venv
+            weather-agent
+            ;
+          default = weather-agent;
+        }
+      );
+
+      checks = forAllSystems (pkgs: {
+        vm = import ./nix/test.nix {
+          inherit pkgs;
+          weather-agent = self.packages.${pkgs.stdenv.hostPlatform.system}.weather-agent;
+        };
+      });
+
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           packages = [

@@ -40,5 +40,6 @@ failures are reported by exception type only.
 ## Known gaps
 
 - No authentication or per-client rate limit yet; the hourly download budget is global.
-- `uv.lock` has no hashes for wheels from the GraalPy index (it doesn't publish them), and Maven dependencies have
-  no checksum lock.
+- `uv.lock` has no hashes for wheels from the GraalPy index (it doesn't publish them); the Nix venv pins them in
+  `nix/venv.nix`. Maven dependencies have no checksum lock; the Nix build pins the hash of all downloads together
+  (`nix/deps.sha256`).

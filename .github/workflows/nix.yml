@@ -1,0 +1,77 @@
+name: Nix
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # Local binary cache holding what cache.nixos.org doesn't have (the dependency download, GraalPy, the Pyronaut CLI,
+  # venv and JAR), carried between runs by actions/cache. Uncached, the dependency download alone takes a
+  # few minutes. trusted=1 because the local cache is unsigned.
+  NIX_LOCAL_CACHE: /home/runner/nix-local-cache
+
+jobs:
+  # The package (dependencies, venv, JAR, wrapper) and the NixOS VM test.
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      # hardware acceleration for the NixOS test VM
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            extra-substituters = file://${{ env.NIX_LOCAL_CACHE }}?trusted=1&priority=30
+
+      # Keyed on what the dependency download and the tools depend on, so code-only changes reuse the cache (the JAR
+      # and the VM test are rebuilt, which takes a few minutes). After a dependency change, the fallback key still
+      # provides GraalPy and the CLI.
+      - name: Restore local binary cache
+        id: restore
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.NIX_LOCAL_CACHE }}
+          key: nix-local-${{ hashFiles('flake.lock', 'nix/**', 'pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            nix-local-
+
+      - name: Initialize local binary cache
+        run: |
+          mkdir -p "$NIX_LOCAL_CACHE"
+          printf 'StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 30\n' > "$NIX_LOCAL_CACHE/nix-cache-info"
+
+      # Fails with a hash mismatch if nix/deps.sha256 is out of date with pyproject.toml.
+      - name: Check flake
+        run: nix flake check -L
+
+      - name: Fill local binary cache
+        if: steps.restore.outputs.cache-hit != 'true'
+        run: |
+          # Start from scratch so paths from older dependency sets don't pile up.
+          find "$NIX_LOCAL_CACHE" -mindepth 1 ! -name nix-cache-info -delete
+          # Paths substituted from cache.nixos.org carry its signature. Anything without a real signature (locally
+          # built paths only show "ultimate", fixed-output ones also a "ca:" entry) was built here or came from the
+          # local cache, and is what the next run can't download. nix copy adds their closures, which a binary cache
+          # needs (~2.8 GB uncompressed).
+          nix build --no-link --print-out-paths .#deps .#graalpy .#pyronaut-cli .#weather-agent .#checks.x86_64-linux.vm \
+            | xargs nix path-info --recursive --sigs \
+            | awk '{ for (i = 2; i <= NF; i++) if ($i ~ /^[^:]+:[A-Za-z0-9+\/]+=*$/) next; print $1 }' \
+            | xargs --no-run-if-empty nix copy --to "file://$NIX_LOCAL_CACHE?compression=none"
+          du -sh "$NIX_LOCAL_CACHE"
+
+      - name: Save local binary cache
+        if: steps.restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.NIX_LOCAL_CACHE }}
+          key: ${{ steps.restore.outputs.cache-primary-key }}
