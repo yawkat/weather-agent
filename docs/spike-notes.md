@@ -1,0 +1,138 @@
+# Phase 0 spike notes (2026-10-07)
+
+## Toolchain (spike 0.1): works
+
+- Dev shell: nixpkgs `graalvm-ce` 25.4.4.1.1 (JDK 25.0.4) + `uv`.
+  - nixpkgs `graalvm-oracle` is JDK 25.0.3. Pyronaut's GraalPy runtime (polyglot 25.4.4.1.1) rejects it and
+    falls back to interpreter-only mode, which is slow. Use CE until an Oracle 25.0.4 build is packaged.
+- uv-managed GraalPy (`graalpy-3.13` = 25.4.4) runs under nix-ld, but only with `LD_LIBRARY_PATH` set:
+  GraalPy `dlopen()`s `libpythonvm.so`.
+- `uv venv --seed -p graalpy-3.13 && uv sync` installs numpy 2.4.4 from the GraalPy wheel index.
+  `pyronaut install` accepts the existing `.venv`.
+- numpy inside the app needs `graalpy.context.allow-native-access = true`.
+- Java packages beyond JDK/Jakarta/Micronaut must be allowed via `graalpy.context.host-class-lookup`.
+- `pyronaut test` (pytest engine) works; about 19 s per run, including startup.
+- micronaut-mcp HTTP transport, Micronaut Data JDBC (Postgres) and Flyway all work from Python.
+
+## Pyronaut quirks found (candidates for upstream issues)
+
+1. **Stale generated files after incremental processing.** After editing a source, the next `pyronaut run`
+   sometimes fails with `VFS.initEntries: could not find resource
+   .../__micronaut_java_imports_<hash>.py`. Workaround: `pyronaut clean && pyronaut process`.
+2. **Flyway can't find classpath migrations in the fat JAR** ("Schema has version 1, but no migration could
+   be resolved"). The SQL file is in the JAR (`PYRONAUT-INF/app/resources/...`). Workaround:
+   `WEATHER_MIGRATIONS=filesystem:/path/to/db/migration`.
+3. **JVM crash** (`Py_REFCNT` in `libpython-native.so`) when calling `np.frombuffer(memoryview(java_bytebuffer))`.
+   Real GraalPy bug. Workaround: hand data over via a file (Java writes, Python reads bytes).
+4. `np.fromfile` / `np.memmap` fail: Pyronaut uses GraalPy's `java` posix backend (no real file
+   descriptors). Use `np.frombuffer(f.read())`.
+5. `np.asarray(java_float_array)` hits `RecursionError`.
+6. A custom `__init__.py` in the source tree is rejected; Pyronaut generates package `__init__.py` files.
+7. Repository finder names must use the Python (snake_case) property names; `findByDisplayName` fails.
+8. The processor generates Java for every annotated Python class under `src/`, and fails on e.g. methods
+   returning a Python exception type. Pure-Python code therefore lives in `packages/weather_core`, a uv
+   workspace member installed editable into the venv.
+9. `graalpy.context.allow-native-access` is not applied to the pytest collection context. A
+   `GraalPyContextCustomizer` registered via `META-INF/services` (see `src-java/`) works everywhere.
+10. Python code can't start threads ("Creating threads is not allowed"). Parallel downloads use the Micronaut
+    HTTP client's async API from Python (`src/weather_agent/http_fetcher.py`): start a batch, then await each
+    future. No Python callbacks run on Netty threads.
+11. `os.replace`/`os.rename` fail with "Atomic move not supported" (java posix backend);
+    `weather_core.store.atomic_replace` falls back to `java.nio.file.Files.move(ATOMIC_MOVE)`.
+12. `zoneinfo` finds no system tz database; the `tzdata` package fixes it.
+13. Java exceptions raised into Python are not caught by `except Exception`, only by `except BaseException`.
+14. `@Tool`/`@ToolArg` arguments must be literals; string concatenation is rejected.
+15. Not Pyronaut: the JDK truststore lacks the HARICA root that signs data.ecmwf.int, so the HTTP client trusts
+    the system bundle (`micronaut.certificate.file.system-ca` + `ssl.trust-name`). Micronaut's `PemParser`
+    rejects the label lines between certificates in distro bundles, so the dev shell writes a cleaned copy.
+16. `java.type("byte[]")` is rejected by the host-class filter (array names don't match package prefixes, and
+    listing `byte[]` doesn't help); use the default `ByteBuffer` body and `toByteArray()`.
+17. Pyronaut maps Python `datetime` to naive Java types and rejects aware values ("Aware datetime.datetime values
+    cannot be converted to a naive Java type"); timestamps are stored as naive UTC.
+
+## GRIB decoding (spike 0.2): works, via netCDF-Java `edu.ucar:grib` 5.11.0
+
+- All products use CCSDS packing (template 5.42). It needs native `libaec`, found through JNA
+  (`LD_LIBRARY_PATH` in dev, `-Djna.library.path` in production).
+- Results match ecCodes exactly, except masked points: NaN in Java, 9999 fill in ecCodes.
+- Decode time per field: ICON-EU-EPS ~5 ms, ECMWF global 0.25° ~15 ms, RUC-EPS ~120 ms (first call, JIT warm-up).
+  Hand-off to numpy adds ~15–35 ms.
+
+## ICON grids (spike 0.3): no grid files needed
+
+- RUC-EPS / D2 use grid 47 and EU-EPS uses grid 63 (GRIB template 3.101, unstructured).
+- DWD publishes `clat`/`clon` (and `hsurf`, `fr_land`) as time-invariant GRIB fields per product:
+  - old layout: `icon-eu-eps/grib/00/clat/`
+  - v1 layout: `nwp/v1/m/icon-d2-ruc-eps/p/CLAT/`
+- Decode them with the same code path. `hsurf` gives model orography for elevation adjustment.
+
+## Packaging (spike 0.4): partially done
+
+- The fat JAR (~109 MB) runs on plain Nix `graalvm-ce` `java -jar` with a clean environment.
+- **No GraalPy interpreter is needed at runtime.** `VIRTUAL_ENV` only needs:
+  - `lib/python3.13/site-packages/`
+  - `pyvenv.cfg`
+  - any executable `bin/python`; it's never run, but GraalPy uses it to find the venv
+- Native wheels need their ELF RPATHs patched (`libstdc++.so.6`). In Nix, use `autoPatchelfHook`.
+- Pyronaut's build tools (`pyronaut-processor`, `pyronaut-jar-build`, …) are JVM shell scripts, not native
+  binaries. Only the `pyronaut-dev`/`pyronaut-run*` launchers are native.
+- Still open: building the JAR inside a fixed-output derivation. It needs Pyronaut setup, a GraalPy that passes
+  Pyronaut's venv check, and Maven downloads, all in the sandbox.
+
+## DuckDB as the query engine (spike, 2026-10-07): works
+
+`org.duckdb:duckdb_jdbc:1.5.6.0` (MIT), used from Java (`src-java/at/yawk/weatheragent/SqlCube.java`) and called
+from Python. Tests: `tests/test_duckdb_spike.py`.
+
+- **Native library:** the JDBC jar (85 MB, bundles `libduckdb_java.so` for linux_amd64/arm64) loads under
+  Pyronaut on NixOS with the dev shell's library path. It's extracted to a temp file and removed afterwards;
+  nothing is written to `~/.duckdb`. The Nix service needs `libstdc++` on its library path.
+- **Loading:** Python writes int32/float32 columns with numpy, and Java bulk-appends them through
+  `DuckDBAppender`. Measured (2 models × 50 members, 6 variables):
+
+  | Shape | Rows | Load | Example queries |
+  |---|---|---|---|
+  | point, 30 times | 3,000 | 0.01 s | 0.03 s |
+  | route, 2,000 samples | 200,000 | 0.16 s | 0.07 s |
+  | area, 30 times × 1,000 points | 3,000,000 | 2.3 s | 0.31 s |
+
+- **Schema in the spike:**
+  - `models`, `times`, `points` dimension tables plus a `raw` member table
+  - a `samples` view joining them, and a `per_member` view of common aggregates
+  - macros `prob(cond)` and `share(group_col)`
+- **Macro quirks:**
+  - a macro body can't refer to columns that aren't parameters, so it's `share(model)`, not `share()`
+  - `GROUP BY ALL` misclassifies the window-over-aggregate in `share()`, so group explicitly
+- **Lockdown after loading:** `enable_external_access=false`, extension auto-install/auto-load off, community
+  extensions off, `lock_configuration=true`, plus `memory_limit`, `threads` and `temp_directory=''` (no spilling).
+  - Verified blocked, all with "Permission Error … file system operations are disabled" or "configuration has
+    been locked":
+    - reading files: `read_csv`, `read_text`, `read_blob`, `glob`
+    - writing: `COPY … TO`
+    - remote access: `read_parquet('https://…')`
+    - extensions and databases: `INSTALL`/`LOAD httpfs`, `ATTACH`
+    - unlocking: `SET enable_external_access`, `SET lock_configuration`
+  - `getenv` doesn't exist in this build. `duckdb_extensions()` is blocked too (it reads a directory), which is
+    harmless.
+- **Limits:**
+  - a timeout via `Statement.cancel()` from a scheduler stopped a long query after exactly 2 s
+  - a 256 MB memory limit failed an oversized query with "Out of Memory"
+  - the cube stayed usable afterwards in both cases
+- **Error messages:** the JDBC driver prefixes most errors with "Invalid Input Error: Attempting to execute an
+  unsuccessful or closed pending query result". The useful part (e.g. "Binder Error: … LINE 1: …") follows on
+  the next lines, so strip that prefix before showing errors to the LLM.
+
+## Upstream issues filed (2026-10-07)
+
+- GraalPy crash on `np.frombuffer(memoryview(ByteBuffer))`: https://github.com/oracle/graalpython/issues/1198
+- Micronaut `PemParser` rejects distro CA bundles: https://github.com/micronaut-projects/micronaut-core/issues/13782
+- Pyronaut:
+  - Flyway classpath migrations in the fat JAR: https://github.com/micronaut-projects/pyronaut/issues/329
+  - stale `__micronaut_java_imports_*.py` after incremental processing: https://github.com/micronaut-projects/pyronaut/issues/330
+  - processor generates Java for plain helper classes: https://github.com/micronaut-projects/pyronaut/issues/331
+  - `graalpy.context` settings not applied to pytest collection: https://github.com/micronaut-projects/pyronaut/issues/332
+  - `java` posix backend (rename, `np.fromfile`, `zoneinfo`): https://github.com/micronaut-projects/pyronaut/issues/333
+  - aware datetimes can't map to Java: https://github.com/micronaut-projects/pyronaut/issues/334
+  - Java exceptions not caught by `except Exception`: https://github.com/micronaut-projects/pyronaut/issues/335
+  - `host-class-lookup` can't allow `byte[]`: https://github.com/micronaut-projects/pyronaut/issues/336
+  - validate-config rejects `'6MB'` for `@ReadableBytes`: https://github.com/micronaut-projects/pyronaut/issues/337

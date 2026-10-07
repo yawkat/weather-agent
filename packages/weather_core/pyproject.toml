@@ -1,0 +1,15 @@
+[project]
+name = "weather-core"
+version = "0.1.0"
+description = "Ensemble forecast evaluation: condition language, sampling, probabilities (pure Python + numpy)"
+license = "Apache-2.0"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2.4",
+    # zoneinfo can't see the system tz database under GraalPy's "java" posix backend.
+    "tzdata",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

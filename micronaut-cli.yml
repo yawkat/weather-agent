@@ -1,0 +1,6 @@
+applicationType: default
+defaultPackage: weather_agent
+testFramework: pytest
+sourceLanguage: python
+buildTool: pyronaut
+features: [app-name, data, data-jdbc, flyway, gitignore, http-client, jdbc-hikari, logback, mcp-http, micronaut-http-validation, netty-server, postgres, pyronaut, pyronaut-agent-skills, pyronaut-requests, pytest, python, python-application, readme, security, security-processor, serialization-jackson, static-resources, test-resources, toml]
