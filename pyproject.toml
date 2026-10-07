@@ -73,36 +73,21 @@ packages = [
 
 [tool.pyronaut.validation]
 enabled = true
-suppressions = [
-    "micronaut.test-resources*",
-]
 
 [tool.pyronaut.test]
 engine = "pytest"
 
-# Starts a Postgres container (rootless Docker) for `pyronaut dev` / `pyronaut test`.
-[tool.pyronaut.test-resources]
-enabled = true
-infer-classpath = true
-
 [tool.pyronaut.dependencies]
 runtime = [
-    "io.micronaut.data:micronaut-data-jdbc",
-    "io.micronaut.flyway:micronaut-flyway",
     "io.micronaut.mcp:micronaut-mcp-server-java-sdk",
     "io.micronaut.pyronaut:micronaut-pyronaut-logback",
     "io.micronaut.serde:micronaut-serde-jackson",
-    "io.micronaut.sql:micronaut-jdbc-hikari",
-    "io.micronaut.testresources:micronaut-test-resources-client",
     "io.micronaut:micronaut-http-client",
     "io.micronaut:micronaut-http-server-netty",
-    "org.flywaydb:flyway-database-postgresql",
-    "org.postgresql:postgresql",
     "edu.ucar:grib:5.11.0",
     "org.duckdb:duckdb_jdbc:1.5.6.0",
 ]
 build = [
-    "io.micronaut.data:micronaut-data-processor",
     "io.micronaut.serde:micronaut-serde-processor",
     "io.micronaut:micronaut-http-validation",
 ]

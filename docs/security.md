@@ -41,4 +41,3 @@ failures are reported by exception type only.
 - No authentication or per-client rate limit yet; the hourly download budget is global.
 - `uv.lock` has no hashes for wheels from the GraalPy index (it doesn't publish them), and Maven dependencies have
   no checksum lock.
-- `micronaut-test-resources-client` is a runtime dependency (inactive without a test-resources server).

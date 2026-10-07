@@ -21,7 +21,7 @@
    .../__micronaut_java_imports_<hash>.py`. Workaround: `pyronaut clean && pyronaut process`.
 2. **Flyway can't find classpath migrations in the fat JAR** ("Schema has version 1, but no migration could
    be resolved"). The SQL file is in the JAR (`PYRONAUT-INF/app/resources/...`). Workaround:
-   `WEATHER_MIGRATIONS=filesystem:/path/to/db/migration`.
+   `WEATHER_MIGRATIONS=filesystem:/path/to/db/migration`. (Moot since the database was removed.)
 3. **JVM crash** (`Py_REFCNT` in `libpython-native.so`) when calling `np.frombuffer(memoryview(java_bytebuffer))`.
    Real GraalPy bug. Workaround: hand data over via a file (Java writes, Python reads bytes).
 4. `np.fromfile` / `np.memmap` fail: Pyronaut uses GraalPy's `java` posix backend (no real file

@@ -48,11 +48,6 @@
             sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' \
               ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt > var/ca-certificates.pem
             export WEATHER_CA_BUNDLE="$PWD/var/ca-certificates.pem"
-            # Rootless Docker for Micronaut Test Resources / Testcontainers.
-            if [ -z "''${DOCKER_HOST:-}" ] && [ -S "$XDG_RUNTIME_DIR/docker.sock" ]; then
-              export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock"
-              export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE="$XDG_RUNTIME_DIR/docker.sock"
-            fi
             # Regenerable state: keep it out of restic backups too.
             for d in .venv __pyronaut__; do
               [ -d "$d" ] && touch "$d/.nobackup"
