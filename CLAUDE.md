@@ -11,13 +11,19 @@ Agents query per-member samples with DuckDB SQL through one `forecast` tool.
 - `src/weather_agent/`: Micronaut/MCP glue (tools, fetcher on Micronaut's HTTP client, DuckDB engine).
 - `src-java/at/yawk/weatheragent/`: Java helpers where performance or interop needs them (GRIB decoding, DuckDB
   loading, Host/Origin filter, GraalPy native access).
+- `nix/`: pure Nix build (venv from `uv.lock`, downloads as a fixed-output derivation, offline JAR build,
+  `weather-agent` wrapper) and a VM
+  test (`checks.x86_64-linux.vm`). Hosts (goliath) define the systemd unit themselves; `nix/test.nix` shows one.
 - `docs/spike-notes.md`: Pyronaut/GraalPy quirks and workarounds. Read it before changing framework-facing code.
 - `docs/security.md`: input limits and sandboxing.
 
 ## Working on it
 
-- Run everything inside `nix develop`. Tests: `pyronaut test` (pytest on GraalPy; Postgres from Test Resources
-  on rootless Docker). On `VFS.initEntries: could not find resource`, run `pyronaut clean` (pyronaut#330).
+- Run everything inside `nix develop`. Tests: `pyronaut test` (pytest on GraalPy). On
+  `VFS.initEntries: could not find resource`, run `pyronaut clean` (pyronaut#330).
+- After changing `pyproject.toml` (or bumping Pyronaut/GraalVM in Nix), `nix build .#deps` fails with a hash
+  mismatch: copy the `got:` hash into `nix/deps.sha256`. Code changes need no hash update. New wheels from the
+  GraalPy index need a hash in `nix/venv.nix`.
 - Never run several `nix build` / `nix flake check` commands concurrently.
 - Don't run `pyronaut` in this directory while a `pyronaut dev` is running here: they share `__pyronaut__/`.
   Use a copy of the project instead.
