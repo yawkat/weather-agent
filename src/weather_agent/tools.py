@@ -11,6 +11,7 @@ from weather_core.cube import describe_schema
 from weather_core.sources.base import SourceError
 
 from .forecast_service import ForecastService
+from .geocoding import GeocodeService
 
 log = logging.getLogger(__name__)
 
@@ -93,3 +94,19 @@ class ForecastTools:
                        gpx: Annotated[str | None, ToolArg(description="GPX document text")] = None,
                        speed_kmh: Annotated[float | None, ToolArg(description="Average speed in km/h")] = None) -> str:
         return _run(lambda: self.forecaster.describe_route(polyline=polyline, gpx=gpx, speed_kmh=speed_kmh))
+
+
+@Singleton
+class PlaceTools:
+    def __init__(self, service: GeocodeService):
+        self.geocoder = service.geocoder
+
+    @Tool(description="Resolve place names to coordinates with OpenStreetMap's Nominatim (best match only). Give "
+                      "complete names, ideally with region or country ('Freiburg im Breisgau', 'Bonn, Germany'), "
+                      "not prefixes to autocomplete. Several names separated by ';' (max 10). Each result has lat, "
+                      "lon, the matched label (check it is the place you meant) and a 'place' string for "
+                      "forecast(places=...). Uncached names take about a second each. Credit the attribution when "
+                      "showing results.")
+    def resolve_place(self,
+                      query: Annotated[str, ToolArg(description="Place name(s), e.g. 'Cologne, Germany; Bonn, Germany'")]) -> str:
+        return _run(lambda: self.geocoder.resolve_many(query))

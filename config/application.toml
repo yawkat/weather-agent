@@ -14,6 +14,11 @@ max-request-size = 6291456  # 6 MiB
 # Host names (and Origin hosts) /mcp accepts; protects against DNS rebinding from browsers (McpHostFilter).
 allowed-hosts = '${WEATHER_ALLOWED_HOSTS:`localhost,127.0.0.1,::1`}'
 
+[weather.geocoder]
+# Public Nominatim: ≤1 request/s, identifying User-Agent, results cached in memory. Point this at a
+# self-hosted Nominatim if usage grows.
+url = '${WEATHER_GEOCODER_URL:`https://nominatim.openstreetmap.org`}'
+
 # Upstream downloads (ECMWF, DWD). The JDK's CA list lacks some roots the system (Mozilla) bundle has, e.g.
 # HARICA, which signs data.ecmwf.int, so the client trusts the system PEM bundle.
 [micronaut.certificate.file.system-ca]

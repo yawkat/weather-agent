@@ -24,6 +24,7 @@ caller (an unauthenticated client, or an LLM steered by untrusted content) can d
 | GPX | 5M characters, no DOCTYPE/entities | `geometry.py` |
 | Route | 20k input points, 2,000 samples (spacing grows), speed ≤ 200 km/h | `geometry.py` |
 | Area | radius ≤ 1,000 km or bbox span ≤ 30°, ≤ 500 points at 10 km spacing (spacing chosen before allocating) | `geometry.py`, `forecast.py` |
+| Place names | ≤ 10 per call, ≤ 200 characters each; Nominatim requests serialised and ≥ 1 s apart, results (hits and misses) cached in memory, LRU of 10,000 names | `geocode.py` |
 | Downloads | `weather.download.max-mb-per-query` (4,000) and `…-per-hour` (20,000), checked before downloading | `budget.py` |
 
 Route samples read only their own grid point, so memory is linear in route length.
