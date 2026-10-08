@@ -32,6 +32,16 @@ def test_geocoder_is_wired(my_context):
     assert len(requests) == 1
 
 
+
+def test_ecmwf_mirrors_are_configured(my_context):
+    from weather_agent.forecast_service import ForecastService
+
+    sources = [s for s in my_context.getBean(ForecastService).forecaster.sources if s.name.startswith("ecmwf")]
+    assert len(sources) == 2 and sources[0].hosts is sources[1].hosts
+    assert sources[0].hosts.bases == ["https://data.ecmwf.int/forecasts",
+                                      "https://storage.googleapis.com/ecmwf-open-data",
+                                      "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com"]
+
 def test_fetcher_reports_error_status(my_context):
     """A non-200, non-404 answer (here GET /mcp on our own server) is an UpstreamError naming the status."""
     from micronaut.runtime.server import EmbeddedServer
@@ -44,6 +54,21 @@ def test_fetcher_reports_error_status(my_context):
     with pytest.raises(UpstreamError, match=r"HTTP [45]\d\d"):
         my_context.getBean(Fetchers).nominatim.get(f"http://localhost:{server.getPort()}/mcp")
 
+
+
+def test_fetcher_download_404_is_not_published(my_context, tmp_path):
+    """Mirrors tells a missing file (NotPublished, final from the origin) from a failing host by this type."""
+    from micronaut.runtime.server import EmbeddedServer
+    from weather_core.sources.base import Download, NotPublished
+
+    from weather_agent.http_fetcher import Fetchers
+
+    server = my_context.getBean(EmbeddedServer)
+    if not server.isRunning():
+        server.start()
+    url = f"http://localhost:{server.getPort()}/no-such-file.grib2"
+    with pytest.raises(NotPublished, match="HTTP 404"):
+        my_context.getBean(Fetchers).ecmwf.download_many([Download(url, [(0, 9)], str(tmp_path / "x"))])
 
 def test_fetcher_timeout(my_context):
     """A server that never answers: the kernel completes the connection, nobody accepts or replies."""

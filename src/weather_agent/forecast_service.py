@@ -8,6 +8,7 @@ from weather_core.budget import DownloadBudget
 from weather_core.forecast import Forecaster
 from weather_core.sources.dwd import ICON_D2_EPS, ICON_D2_RUC_EPS, ICON_EU_EPS, DwdIconSource
 from weather_core.sources.ecmwf import AIFS_ENS, IFS_ENS, EcmwfSource
+from weather_core.sources.mirrors import Mirrors
 from weather_core.store import FieldStore
 
 from .http_fetcher import Fetchers
@@ -25,6 +26,7 @@ class ForecastService:
                  cache_dir: Annotated[str, Value("${weather.cache-dir:var/cache}")],
                  default_tz: Annotated[str, Value("${weather.timezone:Europe/Berlin}")],
                  ecmwf_base_url: Annotated[str, Value("${weather.ecmwf.base-url:`https://data.ecmwf.int/forecasts`}")],
+                 ecmwf_mirrors: Annotated[str, Value("${weather.ecmwf.mirrors:}")],
                  dwd_base_url: Annotated[str, Value("${weather.dwd.base-url:`https://opendata.dwd.de/weather/nwp/v1/m`}")],
                  max_mb_per_query: Annotated[int, Value("${weather.download.max-mb-per-query:4000}")],
                  max_mb_per_hour: Annotated[int, Value("${weather.download.max-mb-per-hour:20000}")],
@@ -39,11 +41,11 @@ class ForecastService:
         def log_download(source: str, run: datetime, size: int) -> None:
             log.info("downloaded %s run %s: %.1f MB", source, run.strftime("%Y-%m-%d %H:%MZ"), size / 1e6)
 
+        ecmwf_hosts = Mirrors(ecmwf_base_url, [url.strip() for url in ecmwf_mirrors.split(",") if url.strip()])
         sources = [
-            EcmwfSource(IFS_ENS, fetchers.ecmwf, decoder, store, base_url=ecmwf_base_url, on_download=log_download,
-                        budget=budget),
-            EcmwfSource(AIFS_ENS, fetchers.ecmwf, decoder, store, base_url=ecmwf_base_url, on_download=log_download,
-                        budget=budget),
+            *(EcmwfSource(model, fetchers.ecmwf, decoder, store, hosts=ecmwf_hosts, on_download=log_download,
+                          budget=budget)
+              for model in (IFS_ENS, AIFS_ENS)),
             *(DwdIconSource(model, fetchers.dwd, decoder, store, base_url=dwd_base_url, on_download=log_download,
                             budget=budget)
               for model in (ICON_D2_RUC_EPS, ICON_D2_EPS, ICON_EU_EPS)),

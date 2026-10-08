@@ -29,6 +29,12 @@ url = '${WEATHER_GEOCODER_URL:`https://nominatim.openstreetmap.org`}'
 path = '${WEATHER_CA_BUNDLE:`/etc/ssl/certs/ca-certificates.crt`}'
 format = 'PEM'
 
+[weather.ecmwf]
+# Open data comes from data.ecmwf.int (`base-url`) and, while that fails (e.g. HTTP 429), from these copies with the
+# same layout and bytes, in order (weather_core.sources.mirrors). Google Cloud's held up when the others throttled;
+# AWS's S3 bucket often answers 503 SlowDown while everyone fetches a new run. They copy new runs minutes late.
+mirrors = '${WEATHER_ECMWF_MIRRORS:`https://storage.googleapis.com/ecmwf-open-data,https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com`}'
+
 # One client per upstream (http_fetcher.Fetchers). Request URLs are absolute, so `url` is only a default.
 [micronaut.http.services.ecmwf]
 url = 'https://data.ecmwf.int'
@@ -36,6 +42,8 @@ read-timeout = '5m'
 max-content-length = 104857600  # 100 MiB; range responses are ~1 MB
 follow-redirects = true
 ssl.trust-name = 'system-ca'
+# The Google Cloud mirror negotiates HTTP/2, which is slow with Micronaut's client (see the dwd service below).
+alpn-modes = ['http/1.1']
 pool.max-concurrent-http1-connections = 8
 
 [micronaut.http.services.dwd]

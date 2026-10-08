@@ -23,7 +23,7 @@ from micronaut.context.annotation import Value
 from micronaut.http import HttpRequest
 from micronaut.http.client import HttpClient
 from micronaut.http.client.annotation import Client
-from weather_core.sources.base import Download, SourceError
+from weather_core.sources.base import Download, NotPublished, SourceError
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +92,8 @@ class MicronautFetcher:
                 results = self._exchange([self._request(requests[idx].url, rng) for idx, rng, _ in batch], BYTES)
                 for (idx, rng, offset), (status, body) in zip(batch, results):
                     url = requests[idx].url
+                    if status == 404:
+                        raise NotPublished(f"{url}: HTTP 404")
                     if status not in (200, 206):
                         raise UpstreamError(f"{url}: HTTP {status}")
                     if rng is not None and len(body) != rng[1] - rng[0] + 1:

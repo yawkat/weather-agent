@@ -18,7 +18,8 @@ class Fetcher(Protocol):
         """Body of a small resource, or None if it doesn't exist (404)."""
 
     def download_many(self, requests: list["Download"]) -> list[int]:
-        """Run downloads (in parallel, if the implementation can); bytes written per request.
+        """Run downloads (in parallel, if the implementation can); bytes written per request. Raises NotPublished
+        if a file doesn't exist.
 
         Python code here can't start threads (GraalPy context policy), so parallelism lives in the fetcher.
         """
@@ -92,6 +93,10 @@ class Prepared:
 
 class SourceError(Exception):
     """A source can't answer this query (out of range, outside domain, data not published yet)."""
+
+
+class NotPublished(SourceError):
+    """A download's file doesn't exist upstream (HTTP 404)."""
 
 
 def runs_by_coverage(candidates: list[datetime], sampling: Callable[[datetime], StepSampling | None]) -> list:
