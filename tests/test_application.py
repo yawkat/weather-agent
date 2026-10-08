@@ -32,6 +32,16 @@ def test_geocoder_is_wired(my_context):
     assert len(requests) == 1
 
 
+
+def test_ecmwf_mirrors_are_configured(my_context):
+    from weather_agent.forecast_service import ForecastService
+
+    sources = [s for s in my_context.getBean(ForecastService).forecaster.sources if s.name.startswith("ecmwf")]
+    assert len(sources) == 2 and sources[0].hosts is sources[1].hosts
+    assert sources[0].hosts.bases == ["https://data.ecmwf.int/forecasts",
+                                      "https://storage.googleapis.com/ecmwf-open-data",
+                                      "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com"]
+
 def test_fetcher_reports_error_status(my_context):
     """A non-200, non-404 answer (here GET /mcp on our own server) is an UpstreamError naming the status."""
     from micronaut.runtime.server import EmbeddedServer

@@ -22,6 +22,7 @@ from ..store import FieldStore
 from ..timeaxis import OutsideForecast
 from .base import (NEEDS, Decoder, Download, Fetcher, Prepared, Query, SourceError, SourceSamples, runs_by_coverage,
                    sampling_for, step_list, with_previous)
+from .mirrors import Mirrors
 
 log = logging.getLogger(__name__)
 
@@ -88,17 +89,15 @@ AIFS_ENS = EcmwfModel("ecmwf-aifs-ens", "AIFS ENS 0.25°", "aifs-ens/0p25/enfo",
 
 class EcmwfSource:
     def __init__(self, model: EcmwfModel, fetcher: Fetcher, decoder: Decoder, store: FieldStore,
-                 base_url: str = "https://data.ecmwf.int/forecasts", region: Region = EUROPE,
+                 hosts: Mirrors | None = None, region: Region = EUROPE,
                  clock=lambda: datetime.now(timezone.utc), grid: RegularGrid = GRID,
                  on_download: Callable[[str, datetime, int], None] | None = None,
                  budget: DownloadBudget | None = None):
-        if not base_url.startswith("https://"):
-            raise ValueError("ECMWF base URL must use https")
         self.model = model
         self.fetcher = fetcher
         self.decoder = decoder
         self.store = store
-        self.base_url = base_url.rstrip("/")
+        self.hosts = hosts or Mirrors("https://data.ecmwf.int/forecasts")  # share one between sources so they skip the same failing hosts
         self.crop: Crop = grid.crop(region)
         self.clock = clock
         self.on_download = on_download
@@ -119,9 +118,10 @@ class EcmwfSource:
 
     # -- run discovery -------------------------------------------------------------------------------------------
 
-    def _url(self, run: datetime, step: int, ext: str) -> str:
+    def _path(self, run: datetime, step: int, ext: str) -> str:
+        """Path of a step file relative to the base URL."""
         stamp = run.strftime("%Y%m%d%H%M%S")
-        return f"{self.base_url}/{run:%Y%m%d}/{run:%H}z/{self.model.path}/{stamp}-{step}h-{self.model.file_suffix}.{ext}"
+        return f"{run:%Y%m%d}/{run:%H}z/{self.model.path}/{stamp}-{step}h-{self.model.file_suffix}.{ext}"
 
     def _index(self, run: datetime, step: int) -> list[dict] | None:
         key = (run, step)
@@ -129,7 +129,7 @@ class EcmwfSource:
         # Positive results never change; re-check missing ones after a few minutes.
         if cached is not ... and (cached is not None or time.monotonic() - self._index_cache_time[key] < 300):
             return cached
-        body = self.fetcher.get(self._url(run, step, "index"))
+        body = self.hosts.get(self.fetcher, self._path(run, step, "index"))
         entries = None if body is None else [json.loads(line) for line in body.decode().splitlines() if line.strip()]
         self._index_cache[key] = entries
         self._index_cache_time[key] = time.monotonic()
@@ -188,7 +188,7 @@ class EcmwfSource:
         ranges = _merge([(e["_offset"], e["_offset"] + e["_length"] - 1) for e in wanted])
         fd, path = tempfile.mkstemp(suffix=".grib2", dir=self.store.root)
         os.close(fd)
-        return Download(self._url(run, step, "grib2"), ranges, path), wanted
+        return Download(self._path(run, step, "grib2"), ranges, path), wanted  # URL relative to self.hosts
 
     def _ensure_all(self, run: datetime, by_step: dict[int, set[str]]) -> int:
         plans: dict[int, tuple[Download, list[dict]]] = {}
@@ -204,7 +204,7 @@ class EcmwfSource:
                      len(plans), step_list(sorted(plans)), ",".join(params), size / 1e6)
             if self.budget is not None:
                 self.budget.reserve(size)
-            written = sum(self.fetcher.download_many([download for download, _ in plans.values()]))
+            written = sum(self.hosts.download_many(self.fetcher, [download for download, _ in plans.values()]))
             for step, (download, wanted) in plans.items():
                 self._store_step(run, step, download.dest, wanted)
         finally:

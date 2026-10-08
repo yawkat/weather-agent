@@ -9,6 +9,7 @@ import pytest
 from weather_core.grid import Region, RegularGrid
 from weather_core.sources.base import Query, SourceError
 from weather_core.sources.ecmwf import IFS_ENS, EcmwfSource
+from weather_core.sources.mirrors import Mirrors
 from weather_core.store import FieldStore
 
 RUN = datetime(2026, 10, 7, 0, tzinfo=timezone.utc)
@@ -194,3 +195,36 @@ def test_fields_are_cropped_to_the_region(tmp_path):
     expected = np.ravel_multi_index((rows, cols), LAT.shape)
     assert stored.shape == (MEMBERS, expected.size) and expected.size < LAT.size
     assert (stored == expected).all()
+
+
+class Throttled:
+    """Wraps a fake server; requests to `down` fail like an exhausted HTTP 429 retry."""
+
+    def __init__(self, server, down):
+        self.server = server
+        self.down = down
+        self.urls = []
+
+    def get(self, url):
+        self.urls.append(url)
+        if url.startswith(self.down):
+            raise SourceError(f"{url}: HTTP 429")
+        return self.server.get(url)
+
+    def download_many(self, requests):
+        self.urls += [r.url for r in requests]
+        if any(r.url.startswith(self.down) for r in requests):
+            raise SourceError("HTTP 429")
+        return self.server.download_many(requests)
+
+
+def test_throttled_origin_falls_back_to_mirror(tmp_path):
+    fetcher = Throttled(FakeServer(published_until=60), "https://origin.test/")
+    src = EcmwfSource(IFS_ENS, fetcher, FakeDecoder(), FieldStore(tmp_path),
+                      hosts=Mirrors("https://origin.test", ["https://mirror.test"]),
+                      region=Region(45, 0, 55, 15), clock=lambda: RUN + timedelta(hours=8), grid=GRID)
+    result = src.samples(hourly(RUN + timedelta(hours=24), 6), ["precip"])
+    assert result.samples.variables["precip"][:, 0] == pytest.approx(np.arange(1, MEMBERS + 1), rel=1e-5)
+    # The origin is tried once, then skipped while it cools down.
+    assert [u for u in fetcher.urls if u.startswith("https://origin.test/")] == [fetcher.urls[0]]
+    assert any(u.startswith("https://mirror.test/") and u.endswith(".grib2") for u in fetcher.urls)
