@@ -5,6 +5,7 @@ import math
 import traceback
 from collections.abc import Sequence
 from contextlib import nullcontext
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -15,6 +16,7 @@ from .budget import DownloadBudget
 from .cube import CubeData, ModelEntry, QueryEngine, QueryError, referenced_variables
 from .geometry import LatLon, area_points, decode_polyline, encode_polyline, parse_gpx, sample_route, simplify
 from .grid import OutsideRegion
+from .meteogram import chart_values, daily_summary, parse_variables, series
 from .sources.base import Prepared, Query, SourceError
 from .timeaxis import OutsideForecast
 from .variables import CATALOG
@@ -31,6 +33,10 @@ MAX_SQL_CHARS = 8000
 MAX_ROWS = 4_000_000
 AREA_MAX_POINTS = 500  # ~10 km spacing is already finer than the 0.25° ECMWF grid
 ASSUMED_MEMBERS = 50  # per model, for the size estimate
+METEOGRAM_SPAN = timedelta(days=3)  # default; DWD models get expensive beyond a day or two
+METEOGRAM_MIN_SPAN = timedelta(hours=6)  # shortest window a model is retried with
+METEOGRAM_ATTEMPTS = 6  # windows tried per model
+MAX_LABEL = 60
 
 
 class Source(Protocol):
@@ -41,6 +47,8 @@ class Source(Protocol):
     def prepare(self, query: Query, variables: Sequence[str]) -> Prepared: ...
 
     def describe(self) -> dict: ...
+
+    def coverage_ends(self) -> list[datetime]: ...
 
 
 _EXPECTED = (SourceError, OutsideForecast, OutsideRegion)
@@ -56,11 +64,15 @@ def _attempt(source: Source, problems: list[dict], fn):
     except BaseException as e:  # Java exceptions (network, decoding) arrive as foreign exceptions
         if isinstance(e, _FATAL):
             raise
-        # log.exception's traceback is dropped by the Python→Logback bridge, so put it into the message.
-        log.error("source %s failed: %s: %s\n%s", source.name, type(e).__name__, e, traceback.format_exc())
-        # Details stay in the server log; clients only learn the kind of failure.
-        problems.append({"source": source.name, "reason": f"failed ({type(e).__name__}); see server log"})
+        _report_failure(source, problems, e)
     return None
+
+
+def _report_failure(source: Source, problems: list[dict], e: BaseException) -> None:
+    """Log an unexpected failure (call from its except block) and report only its kind to the client."""
+    # log.exception's traceback is dropped by the Python→Logback bridge, so put it into the message.
+    log.error("source %s failed: %s: %s\n%s", source.name, type(e).__name__, e, traceback.format_exc())
+    problems.append({"source": source.name, "reason": f"failed ({type(e).__name__}); see server log"})
 
 
 class Forecaster:
@@ -170,6 +182,123 @@ class Forecaster:
         if track_times:
             out["gpx_duration_hours"] = round((track_times[-1] - track_times[0]).total_seconds() / 3600, 2)
         return out
+
+    def meteogram(self, lat: float, lon: float, start: str | None = None, end: str | None = None,
+                  variables: str | None = None, sources: Sequence[str] | None = None,
+                  label: str | None = None) -> tuple[dict, dict]:
+        """Every member's time series at one point (for a chart) and a daily summary of them (for the LLM).
+
+        Each model covers as much of start..end as it can: up to the end of its newest available run, or a
+        shorter window if the download budget doesn't stretch further.
+        """
+        _check_point(lat, lon)
+        names = parse_variables(variables)
+        label = " ".join((label or "").split())[:MAX_LABEL] or None
+        if label is not None and not label.isprintable():
+            raise ValueError("label must be printable text")
+        tz = self._tz(start) if start else self.default_tz
+        a = self._time(start) if start else self.clock().replace(minute=0, second=0, microsecond=0)
+        b = self._time(end) if end else a + METEOGRAM_SPAN
+        if b <= a:
+            raise ValueError("end must be after start")
+        self._check_range(a, b)
+        selected = self._select(sources)
+        point = Query(np.array([lat]), np.array([lon]), window=(a, b))
+
+        problems: list[dict] = []
+        chart_models, summary_models, attribution = [], [], []
+        kinds: dict[str, str] = {}
+        with self.budget.query() if self.budget is not None else nullcontext():
+            for source in selected:
+                got = self._longest_window(source, point, names, problems)
+                if got is None:
+                    continue
+                p, until, shortened = got
+                samples = p.samples()
+                s = series(samples, p.interval_vars)
+                kinds |= {n: "instant" for n in s.instant} | {n: "interval" for n in s.interval}
+                missing = sorted(set(names) - source.provides())
+                common = {
+                    "model": source.name,
+                    "name": p.info.model,
+                    "run": p.run.strftime("%Y-%m-%dT%H:%MZ"),
+                    "members": p.info.members,
+                    **({"until": self._format(until, tz), "until_reason": shortened} if shortened else {}),
+                    **({"missing_variables": missing} if missing else {}),
+                }
+                chart_models.append({
+                    **common,
+                    "provider": p.info.provider,
+                    **source.describe(),
+                    "times": [int(t.timestamp()) for t in s.boundaries],
+                    "series": {name: chart_values(values, name)
+                               for name, values in (s.instant | s.interval).items() if name in names},
+                })
+                summary_models.append({
+                    **common,
+                    "lead_hours": [round((t - p.run).total_seconds() / 3600)
+                                   for t in (s.boundaries[0], s.boundaries[-1])],
+                    "daily": daily_summary(s, names, tz),
+                })
+                attribution.append(_attribution(p))
+        if not chart_models:
+            raise SourceError("no model could provide data for this meteogram: "
+                              + "; ".join(f"{p['source']}: {p['reason']}" for p in problems))
+
+        location = {"lat": lat, "lon": lon, **({"label": label} if label else {})}
+        common = {"location": location, "start": self._format(a, tz), "end": self._format(b, tz)}
+        chart = {
+            **common,
+            "timezone": getattr(tz, "key", None),
+            "utc_offset_minutes": _fixed_offset_minutes(tz),
+            "variables": [{"name": n, "unit": CATALOG[n].unit, "description": CATALOG[n].description,
+                           "kind": kinds.get(n, "instant")}
+                          for n in names],
+            "models": chart_models,
+            "unavailable_sources": problems,
+            "attribution": attribution,
+        }
+        summary = {
+            **common,
+            "variables": {n: CATALOG[n].unit for n in names},
+            "daily_statistics": "per model and local day: [10th, 50th, 90th] percentile across members of the "
+                                "day's min/max/total/mean; p_precip_1mm = share of members with ≥1 mm; hours = "
+                                "hours of the day covered",
+            "models": summary_models,
+            "unavailable_sources": problems,
+            "attribution": attribution,
+        }
+        return summary, chart
+
+    def _longest_window(self, source: Source, point: Query, variables: Sequence[str],
+                        problems: list[dict]) -> tuple[Prepared, datetime, str | None] | None:
+        """Prepare `source` for the longest window from point.window's start it can serve.
+
+        Tries the whole window, then the ends of the source's candidate runs, then halvings. Returns the prepared
+        data, the window end and why the next longer window failed (None if the window isn't shorter); None if
+        nothing worked.
+        """
+        a, b = point.window
+        ends = [b] + sorted({e for e in source.coverage_ends() if a + METEOGRAM_MIN_SPAN <= e < b}, reverse=True)
+        while len(ends) < METEOGRAM_ATTEMPTS and (ends[-1] - a) / 2 >= METEOGRAM_MIN_SPAN:
+            half = a + (ends[-1] - a) / 2
+            ends.append(half.replace(minute=0, second=0, microsecond=0))
+        reason = None
+        for end in ends[:METEOGRAM_ATTEMPTS]:
+            try:
+                return source.prepare(replace(point, window=(a, end)), variables), end, reason
+            except OutsideRegion as e:
+                problems.append({"source": source.name, "reason": str(e)})
+                return None
+            except _EXPECTED as e:
+                reason = str(e)
+            except BaseException as e:  # Java exceptions (network, decoding) arrive as foreign exceptions
+                if isinstance(e, _FATAL):
+                    raise
+                _report_failure(source, problems, e)
+                return None
+        problems.append({"source": source.name, "reason": reason})
+        return None
 
     # -- internals -----------------------------------------------------------------------------------------------
 
@@ -308,6 +437,14 @@ class Forecaster:
 
 def _attribution(p: Prepared) -> dict:
     return p.attribution([p.query.window[0], p.query.window[1]] if p.query.window else p.query.times)
+
+
+def _fixed_offset_minutes(tz: tzinfo) -> int | None:
+    """UTC offset of a fixed-offset zone (from an ISO time with an offset); None for named zones."""
+    if getattr(tz, "key", None) is not None:
+        return None
+    offset = tz.utcoffset(None)
+    return None if offset is None else int(offset.total_seconds() // 60)
 
 
 def _check_point(lat: float, lon: float) -> None:

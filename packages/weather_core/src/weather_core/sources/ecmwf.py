@@ -140,6 +140,10 @@ class EcmwfSource:
         latest = now.replace(minute=0, second=0, microsecond=0, hour=now.hour - now.hour % 6)
         return [latest - timedelta(hours=6 * i) for i in range(5)]
 
+    def coverage_ends(self) -> list[datetime]:
+        """Where the candidate runs end, newest run first."""
+        return [run + timedelta(hours=self.model.steps(run)[-1]) for run in self.candidate_runs()]
+
     def find_run(self, query: Query) -> datetime:
         """Newest run that covers the query and has published every needed step."""
         candidates = self.candidate_runs()

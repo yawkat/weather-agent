@@ -187,6 +187,10 @@ class DwdIconSource:
         # Runs take one to three hours to upload; look back far enough to find a complete one.
         return [latest - timedelta(hours=every * i) for i in range(max(4, 6 // every))]
 
+    def coverage_ends(self) -> list[datetime]:
+        """Where the candidate runs end, newest run first."""
+        return [run + timedelta(hours=self.model.last_step) for run in self.candidate_runs()]
+
     def find_run(self, query: Query, params: Collection[str]) -> datetime:
         """Newest run that covers the query and has published every needed step of every needed parameter."""
         candidates = self.candidate_runs()

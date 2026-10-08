@@ -1,0 +1,849 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meteogram</title>
+<!--
+  MCP Apps view for the show_meteogram tool. The host renders it in a sandboxed frame and talks JSON-RPC over
+  postMessage: ui/initialize, then the tool's arguments (tool-input) and result (tool-result). Self-contained:
+  the default MCP Apps CSP allows no external scripts, styles or fetches.
+-->
+<style>
+:root {
+  color-scheme: light;
+  --surface: var(--color-background-primary, #fcfcfb);
+  --ink: var(--color-text-primary, #0b0b0b);
+  --ink-2: var(--color-text-secondary, #52514e);
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --ring: rgba(11, 11, 11, 0.10);
+  --wash: rgba(11, 11, 11, 0.05);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+  --s5: #e87ba4; --s6: #008300; --s7: #4a3aa7; --s8: #e34948;
+  --font: var(--font-sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface: var(--color-background-primary, #1a1a19);
+    --ink: var(--color-text-primary, #ffffff);
+    --ink-2: var(--color-text-secondary, #c3c2b7);
+    --grid: #2c2c2a; --axis: #383835;
+    --ring: rgba(255, 255, 255, 0.10); --wash: rgba(255, 255, 255, 0.06);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface: var(--color-background-primary, #1a1a19);
+  --ink: var(--color-text-primary, #ffffff);
+  --ink-2: var(--color-text-secondary, #c3c2b7);
+  --grid: #2c2c2a; --axis: #383835;
+  --ring: rgba(255, 255, 255, 0.10); --wash: rgba(255, 255, 255, 0.06);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--surface); color: var(--ink); font: 14px/1.4 var(--font); }
+#app { position: relative; padding: 12px 16px 16px; }
+header { display: flex; align-items: flex-start; gap: 8px; }
+header .titles { flex: 1; min-width: 0; }
+h1 { font-size: 16px; font-weight: 600; margin: 0; overflow-wrap: anywhere; }
+.sub { color: var(--ink-2); font-size: 12px; margin: 2px 0 0; }
+button { font: inherit; color: inherit; }
+#fullscreen { border: 1px solid var(--ring); background: transparent; border-radius: 6px; padding: 4px 8px;
+  font-size: 12px; cursor: pointer; }
+#fullscreen:hover { background: var(--wash); }
+#tabs { display: flex; gap: 6px; overflow-x: auto; margin: 12px -16px 4px; padding: 0 16px 4px;
+  scrollbar-width: none; }
+#tabs::-webkit-scrollbar { display: none; }
+.tab { flex: none; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--ring);
+  background: transparent; border-radius: 999px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+  white-space: nowrap; }
+.tab:hover { background: var(--wash); }
+.tab[aria-selected="true"] { border-color: var(--ink); font-weight: 600; }
+.key { display: inline-block; width: 14px; height: 2px; border-radius: 1px; background: currentColor; }
+.key.band { height: 8px; opacity: 0.25; border-radius: 2px; }
+.key.thin { height: 1px; opacity: 0.5; }
+#legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--ink-2); font-size: 12px; margin: 6px 0 2px; }
+#legend span { display: inline-flex; align-items: center; gap: 6px; }
+.panel { margin-top: 10px; }
+.panel-head { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-2); }
+.panel-head b { color: var(--ink); font-weight: 600; }
+.panel svg { display: block; width: 100%; touch-action: pan-y; outline: none; }
+.panel svg:focus-visible { box-shadow: 0 0 0 2px var(--ring); border-radius: 4px; }
+svg text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+#tooltip { position: absolute; z-index: 2; pointer-events: none; display: none; min-width: 150px; max-width: 320px;
+  background: var(--surface); border: 1px solid var(--ring); border-radius: 8px; padding: 6px 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); font-size: 12px; }
+#tooltip .when { color: var(--ink-2); margin-bottom: 4px; }
+#tooltip .row { display: flex; align-items: baseline; gap: 6px; }
+#tooltip .row .key { align-self: center; flex: none; }
+#tooltip .row strong { font-variant-numeric: tabular-nums; white-space: nowrap; }
+#tooltip .row .what { color: var(--ink-2); margin-left: auto; padding-left: 8px; white-space: nowrap; }
+#tooltip .range { color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+#notes { margin-top: 12px; font-size: 12px; color: var(--ink-2); }
+#notes p { margin: 2px 0; }
+details { margin-top: 10px; font-size: 12px; }
+summary { cursor: pointer; color: var(--ink-2); }
+.table-scroll { overflow-x: auto; max-height: 320px; margin-top: 6px; }
+table { border-collapse: collapse; font-variant-numeric: tabular-nums; white-space: nowrap; }
+th, td { padding: 2px 10px 2px 0; text-align: right; border-bottom: 1px solid var(--grid); }
+th:first-child, td:first-child { text-align: left; }
+th { position: sticky; top: 0; background: var(--surface); font-weight: 600; }
+footer { margin-top: 12px; font-size: 11px; color: var(--muted); }
+footer p { margin: 2px 0; }
+#status { color: var(--ink-2); padding: 24px 0; }
+#status.error { color: var(--ink); }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="titles">
+      <h1 id="title">Meteogram</h1>
+      <p class="sub" id="subtitle"></p>
+    </div>
+    <button id="fullscreen" type="button" hidden>Expand</button>
+  </header>
+  <div id="status">Waiting for the forecast…</div>
+  <div id="content" hidden>
+    <nav id="tabs" role="tablist" aria-label="Model"></nav>
+    <div id="legend"></div>
+    <div id="panels"></div>
+    <details id="table-wrap"><summary>Table</summary><div class="table-scroll" id="table"></div></details>
+    <div id="notes"></div>
+    <footer id="attribution"></footer>
+  </div>
+  <div id="tooltip" role="status" aria-live="polite"></div>
+</div>
+<script>
+"use strict";
+
+// ---- protocol ---------------------------------------------------------------------------------------------
+
+const PROTOCOL_VERSION = "2026-01-26";
+const APP_INFO = { name: "weather-agent-meteogram", version: "0.1.0" };
+let nextId = 1;
+const pending = new Map();
+let hostContext = {};
+
+function post(message) {
+  window.parent.postMessage({ jsonrpc: "2.0", ...message }, "*");
+}
+
+function request(method, params) {
+  const id = nextId++;
+  post({ id, method, params });
+  return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+}
+
+function notify(method, params) {
+  post({ method, params });
+}
+
+window.addEventListener("message", (event) => {
+  if (event.source !== window.parent) return;
+  const m = event.data;
+  if (!m || m.jsonrpc !== "2.0") return;
+  if (m.method === undefined && m.id !== undefined) {
+    const p = pending.get(m.id);
+    if (!p) return;
+    pending.delete(m.id);
+    if (m.error) p.reject(m.error); else p.resolve(m.result);
+    return;
+  }
+  const params = m.params || {};
+  switch (m.method) {
+    case "ui/notifications/tool-input":
+    case "ui/notifications/tool-input-partial":
+      showLoading(params.arguments || {});
+      break;
+    case "ui/notifications/tool-result":
+      showResult(params);
+      break;
+    case "ui/notifications/tool-cancelled":
+      showStatus("The forecast request was cancelled.", false);
+      break;
+    case "ui/notifications/host-context-changed":
+      applyContext({ ...hostContext, ...params });
+      break;
+    case "ui/resource-teardown":
+    case "ping":
+      if (m.id !== undefined) post({ id: m.id, result: {} });
+      break;
+    default:
+      if (m.id !== undefined) post({ id: m.id, error: { code: -32601, message: "Method not found" } });
+  }
+});
+
+function applyContext(context) {
+  hostContext = context || {};
+  const root = document.documentElement;
+  if (hostContext.theme === "light" || hostContext.theme === "dark") root.dataset.theme = hostContext.theme;
+  const variables = (hostContext.styles && hostContext.styles.variables) || {};
+  for (const [name, value] of Object.entries(variables)) {
+    if (name.startsWith("--") && typeof value === "string") root.style.setProperty(name, value);
+  }
+  const fonts = hostContext.styles && hostContext.styles.css && hostContext.styles.css.fonts;
+  if (typeof fonts === "string" && !document.getElementById("host-fonts")) {
+    const style = document.createElement("style");
+    style.id = "host-fonts";
+    style.textContent = fonts;
+    document.head.appendChild(style);
+  }
+  const insets = hostContext.safeAreaInsets;
+  if (insets) {
+    const app = document.getElementById("app");
+    app.style.paddingLeft = `${16 + (insets.left || 0)}px`;
+    app.style.paddingRight = `${16 + (insets.right || 0)}px`;
+    app.style.paddingBottom = `${16 + (insets.bottom || 0)}px`;
+  }
+  const modes = hostContext.availableDisplayModes || [];
+  const button = document.getElementById("fullscreen");
+  button.hidden = !modes.includes("fullscreen");
+  button.textContent = hostContext.displayMode === "fullscreen" ? "Close" : "Expand";
+  if (data) render();
+}
+
+document.getElementById("fullscreen").addEventListener("click", () => {
+  const mode = hostContext.displayMode === "fullscreen" ? "inline" : "fullscreen";
+  request("ui/request-display-mode", { mode }).then((result) => {
+    applyContext({ ...hostContext, displayMode: (result && result.mode) || mode });
+  }).catch(() => {});
+});
+
+new ResizeObserver(() => {
+  const el = document.documentElement;
+  notify("ui/notifications/size-changed", { width: el.scrollWidth, height: el.scrollHeight });
+}).observe(document.body);
+
+request("ui/initialize", {
+  protocolVersion: PROTOCOL_VERSION,
+  appInfo: APP_INFO,
+  clientInfo: APP_INFO,
+  capabilities: {},
+  appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+}).then((result) => {
+  applyContext((result && result.hostContext) || {});
+  notify("ui/notifications/initialized", {});
+}).catch(() => {});
+
+// ---- data -------------------------------------------------------------------------------------------------
+
+// Colour follows the model, never its position in this result: fixed slots in this order, then the rest.
+const MODEL_ORDER = ["ecmwf-ens", "ecmwf-aifs-ens", "icon-eu-eps", "icon-d2-eps", "icon-d2-ruc-eps"];
+const LABELS = {
+  t2m: "Temperature", td2m: "Dew point", feels_like: "Feels like", rh: "Humidity", precip: "Precipitation",
+  snow: "Snowfall", wind: "Wind", gust: "Gusts", cloud: "Cloud cover", radiation: "Sunshine (radiation)",
+  cape: "CAPE",
+};
+const NON_NEGATIVE = new Set(["precip", "snow", "wind", "gust", "cloud", "rh", "radiation", "cape"]);
+const PERCENT = new Set(["cloud", "rh"]);
+const BARS = new Set(["precip", "snow"]);
+const WET = 0.1; // mm/h
+
+let data = null;
+let models = [];
+let selected = "compare";
+let hover = null; // { t, panel }
+
+function showStatus(text, error) {
+  const status = document.getElementById("status");
+  status.textContent = text;
+  status.classList.toggle("error", !!error);
+  status.hidden = false;
+  document.getElementById("content").hidden = true;
+}
+
+function showLoading(args) {
+  if (data) return;
+  const where = args.label || (typeof args.lat === "number" ? `${args.lat.toFixed(2)}, ${args.lon.toFixed(2)}` : "");
+  if (where) document.getElementById("title").textContent = `Meteogram · ${where}`;
+  showStatus("Loading the ensemble forecast… the first request for a place can take a minute.", false);
+}
+
+function showResult(result) {
+  const chart = result.structuredContent;
+  if (result.isError || !chart || !Array.isArray(chart.models)) {
+    const text = (result.content || []).map((c) => c.text || "").join("\n").trim();
+    showStatus(text || "The forecast could not be loaded.", true);
+    return;
+  }
+  data = chart;
+  const known = chart.models.filter((m) => MODEL_ORDER.includes(m.model)).map((m) => m.model);
+  const others = chart.models.map((m) => m.model).filter((id) => !MODEL_ORDER.includes(id));
+  const order = [...MODEL_ORDER.filter((id) => known.includes(id)), ...others];
+  models = chart.models.map((m) => prepare(m, chart.variables, MODEL_ORDER.includes(m.model)
+    ? MODEL_ORDER.indexOf(m.model) : MODEL_ORDER.length + others.indexOf(m.model)))
+    .sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+  if (selected !== "compare" && !models.some((m) => m.id === selected)) selected = "compare";
+  if (models.length === 1) selected = models[0].id;
+  document.getElementById("status").hidden = true;
+  document.getElementById("content").hidden = false;
+  render();
+}
+
+function prepare(m, variables, slot) {
+  const vars = {};
+  for (const v of variables) {
+    const members = m.series[v.name];
+    if (!members) continue;
+    const n = members[0] ? members[0].length : 0;
+    const q = { p10: [], p50: [], p90: [], wet: [] };
+    for (let i = 0; i < n; i++) {
+      const column = members.map((row) => row[i]).filter((x) => x !== null && x !== undefined).sort((a, b) => a - b);
+      q.p10.push(quantile(column, 0.1));
+      q.p50.push(quantile(column, 0.5));
+      q.p90.push(quantile(column, 0.9));
+      q.wet.push(column.length ? column.filter((x) => x >= WET).length / column.length : null);
+    }
+    vars[v.name] = { members, q, interval: v.kind === "interval" };
+  }
+  return {
+    id: m.model, name: m.name, run: m.run, membersCount: m.members, until: m.until, untilReason: m.until_reason,
+    missing: m.missing_variables || [], times: m.times, vars, color: `var(--s${Math.min(slot, 7) + 1})`,
+  };
+}
+
+function quantile(sorted, p) {
+  if (!sorted.length) return null;
+  const pos = (sorted.length - 1) * p;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
+// ---- time ---------------------------------------------------------------------------------------------------
+
+const formatters = new Map();
+
+function formatter(options) {
+  const key = JSON.stringify(options);
+  if (!formatters.has(key)) {
+    const zone = data.timezone || "UTC";
+    let f;
+    try {
+      f = new Intl.DateTimeFormat(hostContext.locale || undefined, { ...options, timeZone: zone });
+    } catch (e) {
+      f = new Intl.DateTimeFormat(undefined, { ...options, timeZone: "UTC" });
+    }
+    formatters.set(key, f);
+  }
+  return formatters.get(key);
+}
+
+// Fixed-offset zones (an ISO time with an offset) are formatted as UTC after shifting.
+function local(t) {
+  const shift = data.timezone ? 0 : (data.utc_offset_minutes || 0) * 60;
+  return new Date((t + shift) * 1000);
+}
+
+function hourOf(t) {
+  const parts = formatter({ hour: "numeric", hourCycle: "h23" }).formatToParts(local(t));
+  return Number((parts.find((p) => p.type === "hour") || {}).value);
+}
+
+const fmtDay = (t) => formatter({ weekday: "short", day: "numeric" }).format(local(t));
+const fmtWhen = (t) => formatter({ weekday: "short", day: "numeric", month: "short", hour: "2-digit",
+  minute: "2-digit", hourCycle: "h23" }).format(local(t));
+const fmtRun = (iso) => {
+  const t = Date.parse(iso) / 1000;
+  return formatter({ day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
+    .format(local(t));
+};
+
+function midnights(t0, t1) {
+  const out = [];
+  for (let t = Math.ceil(t0 / 3600) * 3600; t <= t1; t += 3600) {
+    if (hourOf(t) === 0) out.push(t);
+  }
+  return out;
+}
+
+// ---- rendering ----------------------------------------------------------------------------------------------
+
+const SVG = "http://www.w3.org/2000/svg";
+const MARGIN = { l: 38, r: 8, t: 6, b: 20 };
+const TOP_AXIS = 16; // day names above the first panel
+
+function el(tag, attrs, parent) {
+  const node = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
+  if (parent) parent.appendChild(node);
+  return node;
+}
+
+function unitOf(name) {
+  const v = data.variables.find((x) => x.name === name);
+  return v ? v.unit : "";
+}
+
+function decimals(name, value) {
+  if (BARS.has(name)) return Math.abs(value) < 1 ? 2 : 1;
+  return name === "t2m" || name === "td2m" || name === "feels_like" ? 1 : 0;
+}
+
+function fmt(name, value) {
+  return value === null || value === undefined ? "–" : value.toFixed(decimals(name, value));
+}
+
+function shown() {
+  return selected === "compare" ? models : models.filter((m) => m.id === selected);
+}
+
+function render() {
+  formatters.clear();
+  const place = data.location.label || `${data.location.lat.toFixed(2)}, ${data.location.lon.toFixed(2)}`;
+  document.getElementById("title").textContent = `Meteogram · ${place}`;
+  document.getElementById("subtitle").textContent =
+    `${fmtWhen(Date.parse(data.start) / 1000)} – ${fmtWhen(Date.parse(data.end) / 1000)}` +
+    (data.timezone ? ` (${data.timezone})` : "");
+  renderTabs();
+  renderLegend();
+  renderPanels();
+  renderTable();
+  renderNotes();
+  renderAttribution();
+}
+
+function renderTabs() {
+  const tabs = document.getElementById("tabs");
+  tabs.replaceChildren();
+  const entries = models.length > 1 ? [{ id: "compare", name: "Compare models" }, ...models] : models;
+  for (const entry of entries) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "tab";
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", String(entry.id === selected));
+    if (entry.color) {
+      const key = document.createElement("span");
+      key.className = "key";
+      key.style.color = entry.color;
+      button.appendChild(key);
+    }
+    button.appendChild(document.createTextNode(entry.name));
+    button.addEventListener("click", () => {
+      selected = entry.id;
+      hover = null;
+      render();
+    });
+    tabs.appendChild(button);
+  }
+}
+
+function legendItem(parent, color, cls, text) {
+  const item = document.createElement("span");
+  const key = document.createElement("span");
+  key.className = `key ${cls}`;
+  key.style.color = color;
+  item.append(key, document.createTextNode(text));
+  parent.appendChild(item);
+}
+
+function renderLegend() {
+  const legend = document.getElementById("legend");
+  legend.replaceChildren();
+  if (selected === "compare") {
+    // The model tabs above carry each model's colour key.
+    legendItem(legend, "var(--ink-2)", "", "Median");
+    legendItem(legend, "var(--ink-2)", "band", "10–90 % of members");
+  } else {
+    const m = models.find((x) => x.id === selected);
+    legendItem(legend, m.color, "", "Median");
+    legendItem(legend, m.color, "band", "10–90 % of members");
+    legendItem(legend, m.color, "thin", `${m.membersCount} members`);
+  }
+}
+
+function renderPanels() {
+  const container = document.getElementById("panels");
+  container.replaceChildren();
+  const list = shown();
+  const t0 = Math.min(...list.map((m) => m.times[0]));
+  const t1 = Math.max(...list.map((m) => m.times[m.times.length - 1]));
+  const width = Math.max(container.clientWidth, 280);
+  const names = data.variables.map((v) => v.name).filter((n) => list.some((m) => m.vars[n]));
+  names.forEach((name, index) => {
+    const last = index === names.length - 1;
+    const panel = document.createElement("div");
+    panel.className = "panel";
+    const head = document.createElement("div");
+    head.className = "panel-head";
+    const label = document.createElement("span");
+    const strong = document.createElement("b");
+    strong.textContent = LABELS[name] || name;
+    label.append(strong, document.createTextNode(` ${unitOf(name)}`));
+    head.appendChild(label);
+    panel.appendChild(head);
+    const top = index === 0 ? MARGIN.t + TOP_AXIS : MARGIN.t;
+    const height = (BARS.has(name) ? 96 : 120) + top + MARGIN.b;
+    const svg = el("svg", { viewBox: `0 0 ${width} ${height}`, height, tabindex: 0, role: "img",
+      "aria-label": `${LABELS[name] || name} chart; use the arrow keys to read values` });
+    panel.appendChild(svg);
+    container.appendChild(panel);
+    drawPanel(svg, name, list, { t0, t1, width, height, top, axis: last, topAxis: index === 0 });
+  });
+}
+
+function niceTicks(lo, hi, count) {
+  const span = hi - lo || 1;
+  const raw = span / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map((f) => f * mag).find((s) => span / s <= count) || 10 * mag;
+  const ticks = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-9; v += step) ticks.push(+v.toFixed(10));
+  return ticks;
+}
+
+function drawPanel(svg, name, list, frame) {
+  const { t0, t1, width, height, top } = frame;
+  const x = (t) => MARGIN.l + ((t - t0) / (t1 - t0 || 1)) * (width - MARGIN.l - MARGIN.r);
+  const single = list.length === 1 && selected !== "compare";
+
+  // y extent: members in the single-model view, the bands when comparing.
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const m of list) {
+    const v = m.vars[name];
+    if (!v) continue;
+    const arrays = single && !BARS.has(name) ? v.members : [v.q.p10, v.q.p90];
+    for (const row of arrays) for (const value of row) {
+      if (value === null || value === undefined) continue;
+      if (value < lo) lo = value;
+      if (value > hi) hi = value;
+    }
+  }
+  if (!isFinite(lo)) { lo = 0; hi = 1; }
+  if (NON_NEGATIVE.has(name)) lo = 0;
+  if (PERCENT.has(name)) { lo = 0; hi = 100; }
+  if (BARS.has(name)) hi = Math.max(hi, 1);
+  if (hi - lo < 1) hi = lo + 1;
+  const ticks = niceTicks(lo, hi, 4);
+  lo = Math.min(lo, ticks[0]);
+  hi = Math.max(hi, ticks[ticks.length - 1]);
+  const y = (v) => top + (1 - (v - lo) / (hi - lo)) * (height - top - MARGIN.b);
+
+  const grid = el("g", {}, svg);
+  for (const tick of ticks) {
+    el("line", { x1: MARGIN.l, x2: width - MARGIN.r, y1: y(tick), y2: y(tick), stroke: "var(--grid)",
+      "stroke-width": 1, "shape-rendering": "crispEdges" }, grid);
+    const label = el("text", { x: MARGIN.l - 6, y: y(tick) + 4, "text-anchor": "end" }, grid);
+    label.textContent = String(tick);
+  }
+  const days = midnights(t0, t1);
+  for (const t of days) {
+    el("line", { x1: x(t), x2: x(t), y1: top, y2: height - MARGIN.b, stroke: "var(--axis)",
+      "stroke-width": 1, "shape-rendering": "crispEdges" }, grid);
+  }
+  el("line", { x1: MARGIN.l, x2: width - MARGIN.r, y1: y(lo), y2: y(lo), stroke: "var(--axis)",
+    "stroke-width": 1, "shape-rendering": "crispEdges" }, grid);
+  // Day names centred on the visible part of each day, below the last panel and above the first.
+  const edges = [t0, ...days, t1];
+  for (const labelY of [frame.axis && height - 5, frame.topAxis && TOP_AXIS - 2].filter(Boolean)) {
+    for (let i = 0; i + 1 < edges.length; i++) {
+      const a = x(edges[i]);
+      const b = x(edges[i + 1]);
+      if (b - a < 28) continue;
+      const label = el("text", { x: (a + b) / 2, y: labelY, "text-anchor": "middle" }, grid);
+      label.textContent = fmtDay((edges[i] + edges[i + 1]) / 2);
+    }
+  }
+
+  const marks = el("g", {}, svg);
+  for (const m of list) {
+    const v = m.vars[name];
+    if (!v) continue;
+    if (BARS.has(name) && single) {
+      drawBars(marks, m, v, x, y, lo);
+    } else {
+      drawBand(marks, m, v, x, y, single ? 0.22 : 0.12);
+      if (single) for (const row of v.members) drawLine(marks, m.times, row, v.interval, x, y, m.color, 1, 0.22);
+      drawLine(marks, m.times, v.q.p50, v.interval, x, y, m.color, 2, 1);
+    }
+  }
+
+  const cursor = el("line", { y1: top, y2: height - MARGIN.b, stroke: "var(--ink-2)", "stroke-width": 1,
+    visibility: "hidden", "shape-rendering": "crispEdges" }, svg);
+  svg._cursor = { line: cursor, x };
+  attachHover(svg, name, frame, x);
+}
+
+function points(times, values, interval, x, y) {
+  // Instants sit at each time; interval values hold from one time to the next.
+  const pts = [];
+  if (interval) {
+    for (let i = 0; i < values.length; i++) {
+      if (values[i] === null || values[i] === undefined) { pts.push(null); continue; }
+      pts.push([x(times[i]), y(values[i])], [x(times[i + 1]), y(values[i])]);
+    }
+  } else {
+    for (let i = 0; i < values.length; i++) {
+      pts.push(values[i] === null || values[i] === undefined ? null : [x(times[i]), y(values[i])]);
+    }
+  }
+  return pts;
+}
+
+function pathOf(pts) {
+  let d = "";
+  let pen = false;
+  for (const p of pts) {
+    if (!p) { pen = false; continue; }
+    d += `${pen ? "L" : "M"}${p[0].toFixed(1)},${p[1].toFixed(1)}`;
+    pen = true;
+  }
+  return d;
+}
+
+function drawLine(parent, times, values, interval, x, y, color, width, opacity) {
+  const d = pathOf(points(times, values, interval, x, y));
+  if (!d) return;
+  el("path", { d, fill: "none", stroke: color, "stroke-width": width, "stroke-opacity": opacity,
+    "stroke-linejoin": "round", "stroke-linecap": "round" }, parent);
+}
+
+function drawBand(parent, m, v, x, y, opacity) {
+  const upper = points(m.times, v.q.p90, v.interval, x, y);
+  const lower = points(m.times, v.q.p10, v.interval, x, y);
+  // One polygon per run without gaps.
+  let run = [];
+  const flush = () => {
+    if (run.length > 1) {
+      const top = run.map((i) => upper[i]);
+      const bottom = run.map((i) => lower[i]).reverse();
+      el("path", { d: `${pathOf(top)}L${pathOf(bottom).slice(1)}Z`, fill: m.color, "fill-opacity": opacity,
+        stroke: "none" }, parent);
+    }
+    run = [];
+  };
+  for (let i = 0; i < upper.length; i++) {
+    if (upper[i] && lower[i]) run.push(i); else flush();
+  }
+  flush();
+}
+
+function drawBars(parent, m, v, x, y, lo) {
+  const base = y(lo);
+  for (let i = 0; i < v.q.p50.length; i++) {
+    const a = x(m.times[i]);
+    const b = x(m.times[i + 1]);
+    const gap = b - a > 4 ? 1 : 0; // 2px surface gap between neighbours
+    const w = Math.max(b - a - 2 * gap, 0.5);
+    for (const [value, opacity] of [[v.q.p90[i], 0.3], [v.q.p50[i], 1]]) {
+      if (value === null || value <= 0) continue;
+      const top = y(value);
+      el("rect", { x: a + gap, y: top, width: w, height: Math.max(base - top, 0.5), fill: m.color,
+        "fill-opacity": opacity, rx: Math.min(2, w / 2) }, parent);
+    }
+  }
+}
+
+// ---- hover --------------------------------------------------------------------------------------------------
+
+function attachHover(svg, name, frame, x) {
+  const toTime = (clientX) => {
+    const box = svg.getBoundingClientRect();
+    const px = ((clientX - box.left) / box.width) * frame.width;
+    return frame.t0 + ((px - MARGIN.l) / (frame.width - MARGIN.l - MARGIN.r)) * (frame.t1 - frame.t0);
+  };
+  svg.addEventListener("pointermove", (e) => setHover(snap(toTime(e.clientX)), name, svg, e.clientY));
+  svg.addEventListener("pointerdown", (e) => setHover(snap(toTime(e.clientX)), name, svg, e.clientY));
+  svg.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") setHover(null); });
+  svg.addEventListener("blur", () => setHover(null));
+  svg.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    const times = allTimes();
+    let i = hover ? times.indexOf(hover.t) : -1;
+    i = i < 0 ? 0 : Math.max(0, Math.min(times.length - 1, i + (e.key === "ArrowRight" ? 1 : -1)));
+    const box = svg.getBoundingClientRect();
+    setHover(times[i], name, svg, box.top + box.height / 3);
+  });
+}
+
+function allTimes() {
+  const set = new Set();
+  for (const m of shown()) for (const t of m.times) set.add(t);
+  return [...set].sort((a, b) => a - b);
+}
+
+function snap(t) {
+  let best = null;
+  for (const candidate of allTimes()) {
+    if (best === null || Math.abs(candidate - t) < Math.abs(best - t)) best = candidate;
+  }
+  return best;
+}
+
+// The value a model shows at time t: the instant at t, or the interval that starts at t (ends at the last time).
+function valueAt(m, name, t, which) {
+  const v = m.vars[name];
+  if (!v || t < m.times[0] || t > m.times[m.times.length - 1]) return null;
+  let i = m.times.indexOf(t);
+  if (v.interval) {
+    if (i < 0) i = m.times.findIndex((s, k) => s <= t && t < m.times[k + 1]);
+    if (i >= v.q.p50.length) i = v.q.p50.length - 1;
+  }
+  return i < 0 ? null : v.q[which][i];
+}
+
+function setHover(t, name, svg, clientY) {
+  const tooltip = document.getElementById("tooltip");
+  for (const panel of document.querySelectorAll("#panels svg")) {
+    const c = panel._cursor;
+    if (!c) continue;
+    if (t === null) {
+      c.line.setAttribute("visibility", "hidden");
+    } else {
+      c.line.setAttribute("x1", c.x(t));
+      c.line.setAttribute("x2", c.x(t));
+      c.line.setAttribute("visibility", "visible");
+    }
+  }
+  if (t === null) {
+    hover = null;
+    tooltip.style.display = "none";
+    return;
+  }
+  hover = { t, panel: name };
+  tooltip.replaceChildren();
+  const when = document.createElement("div");
+  when.className = "when";
+  when.textContent = fmtWhen(t);
+  tooltip.appendChild(when);
+  if (selected === "compare") {
+    for (const m of models) addRow(tooltip, m.color, name, t, m, m.name);
+  } else {
+    const m = models.find((x) => x.id === selected);
+    for (const v of data.variables) if (m.vars[v.name]) addRow(tooltip, m.color, v.name, t, m, LABELS[v.name] || v.name);
+  }
+  tooltip.style.display = "block";
+  const app = document.getElementById("app").getBoundingClientRect();
+  const box = svg.getBoundingClientRect();
+  const px = box.left - app.left + (svg._cursor.x(t) / svg.viewBox.baseVal.width) * box.width;
+  const w = tooltip.offsetWidth;
+  const left = px + 12 + w > app.width - 8 ? px - 12 - w : px + 12;
+  tooltip.style.left = `${Math.max(8, left)}px`;
+  const top = clientY - app.top - tooltip.offsetHeight - 12;
+  tooltip.style.top = `${Math.max(4, top)}px`;
+}
+
+function addRow(parent, color, name, t, m, what) {
+  const median = valueAt(m, name, t, "p50");
+  const row = document.createElement("div");
+  row.className = "row";
+  const key = document.createElement("span");
+  key.className = "key";
+  key.style.color = color;
+  const value = document.createElement("strong");
+  value.textContent = median === null ? "–" : `${fmt(name, median)} ${unitOf(name)}`;
+  row.append(key, value);
+  if (median !== null) {
+    const range = document.createElement("span");
+    range.className = "range";
+    let text = `${fmt(name, valueAt(m, name, t, "p10"))}–${fmt(name, valueAt(m, name, t, "p90"))}`;
+    if (BARS.has(name)) {
+      const wet = valueAt(m, name, t, "wet");
+      if (wet !== null) text += ` · ${Math.round(wet * 100)} % wet`;
+    }
+    range.textContent = text;
+    row.appendChild(range);
+  }
+  const label = document.createElement("span");
+  label.className = "what";
+  label.textContent = what;
+  row.appendChild(label);
+  parent.appendChild(row);
+}
+
+document.addEventListener("pointerdown", (e) => {
+  if (!e.target.closest || !e.target.closest("#panels svg")) setHover(null);
+});
+
+// ---- table, notes, attribution ------------------------------------------------------------------------------
+
+function renderTable() {
+  const wrap = document.getElementById("table");
+  wrap.replaceChildren();
+  const list = shown();
+  if (list.length !== 1) {
+    const p = document.createElement("p");
+    p.textContent = "Pick a model above to list its values.";
+    wrap.appendChild(p);
+    return;
+  }
+  const m = list[0];
+  const names = data.variables.map((v) => v.name).filter((n) => m.vars[n]);
+  const table = document.createElement("table");
+  const head = table.createTHead().insertRow();
+  for (const text of ["Time", ...names.map((n) => `${LABELS[n] || n} (${unitOf(n)})`)]) {
+    const th = document.createElement("th");
+    th.textContent = text;
+    head.appendChild(th);
+  }
+  const body = table.createTBody();
+  for (const t of m.times) {
+    const row = body.insertRow();
+    row.insertCell().textContent = fmtWhen(t);
+    for (const n of names) {
+      const median = valueAt(m, n, t, "p50");
+      row.insertCell().textContent = median === null ? "–"
+        : `${fmt(n, median)} (${fmt(n, valueAt(m, n, t, "p10"))}–${fmt(n, valueAt(m, n, t, "p90"))})`;
+    }
+  }
+  const note = document.createElement("p");
+  note.textContent = "Median (10–90 % of members). Rates and gusts are for the period starting at each time.";
+  wrap.append(table, note);
+}
+
+function renderNotes() {
+  const notes = document.getElementById("notes");
+  notes.replaceChildren();
+  for (const m of models) {
+    const p = document.createElement("p");
+    let text = `${m.name}: run ${fmtRun(m.run)}, ${m.membersCount} members`;
+    if (m.until) text += `; shown until ${fmtWhen(Date.parse(m.until) / 1000)} (${m.untilReason})`;
+    if (m.missing.length) text += `; no ${m.missing.map((n) => (LABELS[n] || n).toLowerCase()).join(", ")}`;
+    p.textContent = text;
+    notes.appendChild(p);
+  }
+  for (const u of data.unavailable_sources || []) {
+    const p = document.createElement("p");
+    p.textContent = `${u.source}: not shown (${u.reason})`;
+    notes.appendChild(p);
+  }
+}
+
+function renderAttribution() {
+  const footer = document.getElementById("attribution");
+  footer.replaceChildren();
+  const seen = new Set();
+  for (const a of data.attribution || []) {
+    const text = [a.model, a.run && `run ${a.run}`, a.license, a.notice].filter(Boolean).join(" · ");
+    if (seen.has(text)) continue;
+    seen.add(text);
+    const p = document.createElement("p");
+    p.textContent = text;
+    footer.appendChild(p);
+  }
+}
+
+let lastWidth = 0;
+new ResizeObserver(() => {
+  const width = document.getElementById("app").clientWidth;
+  if (data && width !== lastWidth) {
+    lastWidth = width;
+    setHover(null);
+    renderPanels();
+  }
+}).observe(document.getElementById("app"));
+</script>
+</body>
+</html>
