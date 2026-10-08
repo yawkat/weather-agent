@@ -25,7 +25,8 @@ interprets itself (`weather_core/expr/`, documented in `docs/query-language.md`)
 - Run everything inside `nix develop`. Tests: `pyronaut test` (pytest on GraalPy). On
   `VFS.initEntries: could not find resource`, run `pyronaut clean` (pyronaut#330).
 - After changing `pyproject.toml` (or bumping Pyronaut/GraalVM in Nix), `nix build .#deps` fails with a hash
-  mismatch: copy the `got:` hash into `nix/deps.sha256`. Code changes need no hash update. New wheels from the
+  mismatch: copy the `got:` hash into `nix/deps.<system>.sha256`, for each system (x86_64-linux, aarch64-linux)
+  you can build. Code changes need no hash update. New wheels from the
   GraalPy index need a hash in `nix/venv.nix`.
 - Never run several `nix build` / `nix flake check` commands concurrently.
 - Don't run `pyronaut` in this directory while a `pyronaut dev` is running here: they share `__pyronaut__/`.

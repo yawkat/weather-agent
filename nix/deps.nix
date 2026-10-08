@@ -3,10 +3,10 @@
 # (nix/jar.nix), so only dependency changes need a new hash here.
 #
 # The name carries a digest of what the output depends on (pyproject.toml, Pyronaut, GraalVM, the setup and
-# normalization steps), so changing any of them forces a rebuild (and a hash update in nix/deps.sha256 if the
-# output changes) instead of silently reusing old dependencies.
+# normalization steps), so changing any of them forces a rebuild (and a hash update in nix/deps.<system>.sha256 if
+# the output changes) instead of silently reusing old dependencies.
 # After such a change, `nix build .#deps` fails with "hash mismatch ... got: sha256-..."; put that hash into
-# nix/deps.sha256.
+# nix/deps.<system>.sha256. The downloads include native launchers, so each system has its own hash.
 {
   lib,
   stdenvNoCC,
@@ -86,7 +86,7 @@ stdenvNoCC.mkDerivation {
 
   outputHashMode = "recursive";
   outputHashAlgo = "sha256";
-  outputHash = lib.fileContents ./deps.sha256;
+  outputHash = lib.fileContents (./. + "/deps.${stdenvNoCC.hostPlatform.system}.sha256");
 
   buildPhase = ''
     runHook preBuild

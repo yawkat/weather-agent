@@ -44,6 +44,9 @@ stdenv.mkDerivation {
     description = "MCP server answering weather questions from open ensemble forecasts";
     license = lib.licenses.asl20;
     mainProgram = "weather-agent";
-    platforms = [ "x86_64-linux" ];
+    platforms = [
+      "x86_64-linux"
+      "aarch64-linux"
+    ];
   };
 }

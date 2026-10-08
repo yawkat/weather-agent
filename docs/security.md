@@ -73,4 +73,4 @@ Tracebacks of unexpected errors are not redacted.
   may take 1 GB of numpy (native) memory, outside the JVM heap limit.
 - `uv.lock` has no hashes for wheels from the GraalPy index (it doesn't publish them); the Nix venv pins them in
   `nix/venv.nix`. Maven dependencies have no checksum lock; the Nix build pins the hash of all downloads together
-  (`nix/deps.sha256`).
+  (`nix/deps.<system>.sha256`).
