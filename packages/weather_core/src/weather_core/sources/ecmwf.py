@@ -216,12 +216,12 @@ class EcmwfSource:
         return written
 
     def _store_step(self, run: datetime, step: int, path: str, wanted: list[dict]) -> None:
-        fields = self.decoder.decode(path)
+        fields = self.decoder.decode(path, self.crop.extract)
         if len(fields) != len(wanted):
             raise SourceError(f"decoded {len(fields)} fields, expected {len(wanted)}")
         by_param: dict[str, list[tuple[int, np.ndarray]]] = {}
         for entry, values in zip(wanted, fields):
-            by_param.setdefault(entry["_canonical"], []).append((int(entry["number"]), self.crop.extract(values)))
+            by_param.setdefault(entry["_canonical"], []).append((int(entry["number"]), values))
         for param, members in by_param.items():
             members.sort(key=lambda m: m[0])
             self.store.put(self.name, run, param, step, np.stack([v for _, v in members]))

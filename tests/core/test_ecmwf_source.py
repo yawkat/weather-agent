@@ -67,13 +67,13 @@ class FakeServer:
 
 
 class FakeDecoder:
-    def decode(self, path):
+    def decode(self, path, extract=None):
         data = open(path, "rb").read()
         out = []
         for i in range(0, len(data), 16):
             p, m, step, _ = data[i:i + 16].decode().split("|")
             out.append(field(p.strip(), int(step), int(m)))
-        return out
+        return out if extract is None else [extract(f) for f in out]
 
 
 def hourly(start, length):
@@ -173,3 +173,24 @@ def test_route_samples_use_their_own_point(source):
     s = source.samples(query, ["t2m"]).samples
     assert s.variables["t2m"].shape == (MEMBERS, 3)
     assert s.variables["t2m"][0] == pytest.approx([12.4, 12.5, 12.6], abs=1e-3)
+
+
+def test_fields_are_cropped_to_the_region(tmp_path):
+    class PositionDecoder(FakeDecoder):
+        """Every value is its index in the full field, so the stored window shows which points were kept."""
+
+        def decode(self, path, extract=None):
+            out = [np.arange(LAT.size, dtype=np.float32) for _ in super().decode(path)]
+            return out if extract is None else [extract(f) for f in out]
+
+    server = FakeServer(published_until=60)
+    store = FieldStore(tmp_path)
+    src = EcmwfSource(IFS_ENS, server, PositionDecoder(), store, region=Region(48, 3, 52, 8),
+                      clock=lambda: RUN + timedelta(hours=8), grid=GRID)
+    src.samples(hourly(RUN + timedelta(hours=24), 1), ["t2m"])
+    stored = store.get(src.name, RUN, "2t", 24)
+    # One grid step of margin around the region: latitudes 53…47, longitudes 2…9.
+    rows, cols = np.nonzero((LAT >= 47) & (LAT <= 53) & (LON >= 2) & (LON <= 9))
+    expected = np.ravel_multi_index((rows, cols), LAT.shape)
+    assert stored.shape == (MEMBERS, expected.size) and expected.size < LAT.size
+    assert (stored == expected).all()
