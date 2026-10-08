@@ -1,10 +1,13 @@
-"""Answering forecast questions: sample every suitable source into SQL tables, then run the client's query."""
+"""Answering forecast queries (weather_core.expr): fetch what a query needs from every model, then evaluate it."""
 
 import logging
 import math
+import threading
+import time
 import traceback
-from collections.abc import Sequence
-from contextlib import nullcontext
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -12,12 +15,13 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 from .budget import DownloadBudget
-from .cube import CubeData, ModelEntry, QueryEngine, QueryError, referenced_variables
-from .geometry import LatLon, area_points, decode_polyline, encode_polyline, parse_gpx, sample_route, simplify
+from .expr import runtime as rt
+from .expr.axes import BOOL, LABEL, LAT, LON, POINT, RECORD, ExprError, Type
+from .expr.language import Demand, Env, Location, Sizes, compile_query, parse
+from .geometry import LatLon, area_grid, decode_polyline, encode_polyline, parse_gpx, sample_route, simplify
 from .grid import OutsideRegion
 from .sources.base import Prepared, Query, SourceError
 from .timeaxis import OutsideForecast
-from .variables import CATALOG
 
 log = logging.getLogger(__name__)
 
@@ -26,11 +30,14 @@ MAX_PAST = timedelta(days=2)
 MAX_AHEAD = timedelta(days=16)
 MAX_WINDOW = timedelta(days=16)
 MAX_PLACES = 20
-MAX_SQL_CHARS = 8000
-# Bound on rows loaded for one query (members × windows × time samples × points), checked before downloading.
+# Bound on values loaded per variable and location (members × hours × points × models), checked before downloading.
 MAX_ROWS = 4_000_000
 AREA_MAX_POINTS = 500  # ~10 km spacing is already finer than the 0.25° ECMWF grid
 ASSUMED_MEMBERS = 50  # per model, for the size estimate
+
+
+class QueryError(ValueError):
+    """A query can't be answered (no model has data, the server is busy)."""
 
 
 class Source(Protocol):
@@ -63,95 +70,36 @@ def _attempt(source: Source, problems: list[dict], fn):
     return None
 
 
+@dataclass
+class _Resolved:
+    """A query location turned into a source query and coordinates."""
+    query: Query
+    time: rt.Coord
+    space: dict[str, rt.Coord]  # spatial dimensions: none, point, or lat and lon
+    sources: list[Source]
+    variables: list[str]
+    lat: float = math.nan
+    lon: float = math.nan
+    summary: dict = field(default_factory=dict)
+
+
 class Forecaster:
-    def __init__(self, sources: Sequence[Source], engine: QueryEngine, default_tz: str = "Europe/Berlin",
-                 clock=lambda: datetime.now(timezone.utc), budget: DownloadBudget | None = None):
+    def __init__(self, sources: Sequence[Source], default_tz: str = "Europe/Berlin",
+                 clock=lambda: datetime.now(timezone.utc), budget: DownloadBudget | None = None,
+                 max_concurrent: int = 4, busy_timeout_s: float = 30.0, eval_bytes: int = 1 << 30,
+                 eval_timeout_s: float = 15.0, max_rows: int = 500):
         self.sources = list(sources)
         self.budget = budget  # the one the sources reserve from; a query's sources share its per-query limit
-        self.engine = engine
         self.default_tz = ZoneInfo(default_tz)
         self.clock = clock
+        # Evaluations (not downloads) run at most this many at a time: each may hold eval_bytes.
+        self._evaluations = threading.BoundedSemaphore(max_concurrent)
+        self.busy_timeout_s = busy_timeout_s
+        self.eval_bytes = eval_bytes
+        self.eval_timeout_s = eval_timeout_s
+        self.max_rows = max_rows  # result table rows
 
     # -- public operations ---------------------------------------------------------------------------------------
-
-    def forecast(self, sql: str, start: str, end: str | None = None, *, lat: float | None = None,
-                 lon: float | None = None, places: str | None = None, radius_km: float | None = None,
-                 bbox: Sequence[float] | None = None, polyline: str | None = None, gpx: str | None = None,
-                 speed_kmh: float | None = None, use_gpx_times: bool = False, window_hours: float | None = None,
-                 sources: Sequence[str] | None = None) -> dict:
-        """Run `sql` over the samples for one location form: a point, named places, an area, or a route."""
-        tz = self._tz(start)
-        route = polyline is not None or gpx is not None
-        modes = [route, places is not None, bbox is not None or radius_km is not None]
-        stray_coordinates = (route or places is not None or bbox is not None) and (lat is not None or lon is not None)
-        if sum(modes) > 1 or stray_coordinates or (not any(modes) and (lat is None or lon is None)):
-            raise ValueError("give exactly one location: lat+lon (point), places, lat+lon+radius_km or bbox "
-                             "(area), or polyline/gpx (route)")
-        if route:
-            if end is not None or window_hours is not None:
-                raise ValueError("routes take only a departure time (start); end and window_hours don't apply")
-            return self._route(sql, start, tz, polyline, gpx, speed_kmh, use_gpx_times, sources)
-        if end is None:
-            raise ValueError("end is required (except for routes)")
-        range_start, range_end = self._window(start, end)
-        windows = self._windows(range_start, range_end, window_hours)
-        extra = {}
-        names = None
-        if places is not None:
-            names, points = _parse_places(places)
-            kind = "places"
-        elif bbox is not None or radius_km is not None:
-            if (lat is None) != (lon is None):
-                raise ValueError("give both lat and lon for a circle")
-            if lat is not None:
-                _check_point(lat, lon)
-            points = area_points(center=LatLon(lat, lon) if lat is not None else None, radius_km=radius_km,
-                                 bbox=tuple(bbox) if bbox else None, spacing_km=10.0, max_points=AREA_MAX_POINTS)
-            kind = "area"
-            extra["area_points"] = len(points)
-        else:
-            _check_point(lat, lon)
-            points = [LatLon(lat, lon)]
-            kind = "point"
-        query = Query(np.array([p.lat for p in points]), np.array([p.lon for p in points]),
-                      window=(range_start, range_end), area=kind != "point")
-        answer = self._run(query, sql, sources, tz, kind, windows, place_names=names)
-        answer.update(extra)
-        return answer
-
-    def _route(self, sql: str, start: str, tz: tzinfo, polyline: str | None, gpx: str | None,
-               speed_kmh: float | None, use_gpx_times: bool, sources: Sequence[str] | None) -> dict:
-        points, track_times = self._route_points(polyline, gpx)
-        start_time = self._time(start)
-        self._check_range(start_time, start_time)
-        route = sample_route(points, start_time, speed_kmh=None if use_gpx_times else speed_kmh,
-                             track_times=track_times if use_gpx_times else None)
-        self._check_range(route.times[0], route.times[-1])
-        query = Query(route.lat, route.lon, times=route.times, dt_hours=route.dt_hours, bearing=route.bearing)
-        answer = self._run(query, sql, sources, tz, "route", [(route.times[0], route.times[-1])],
-                           distance_km=route.distance_km)
-        answer["route"] = {
-            "length_km": round(route.total_km, 1),
-            "start": self._format(route.times[0], tz),
-            "end": self._format(route.times[-1], tz),
-            "samples": len(route.times),
-        }
-        return answer
-
-    @staticmethod
-    def _windows(start: datetime, end: datetime, window_hours: float | None) -> list[tuple[datetime, datetime]]:
-        """The whole range, or every hourly window of `window_hours` within it."""
-        if window_hours is None:
-            return [(start, end)]
-        if not (math.isfinite(window_hours) and 0 < window_hours <= (end - start).total_seconds() / 3600):
-            raise ValueError("window_hours must be positive and fit inside start..end")
-        length = timedelta(hours=window_hours)
-        windows = []
-        t = start
-        while t + length <= end:
-            windows.append((t, t + length))
-            t += timedelta(hours=1)
-        return windows
 
     def describe_route(self, polyline: str | None = None, gpx: str | None = None,
                        speed_kmh: float | None = None) -> dict:
@@ -171,99 +119,181 @@ class Forecaster:
             out["gpx_duration_hours"] = round((track_times[-1] - track_times[0]).total_seconds() / 3600, 2)
         return out
 
-    # -- internals -----------------------------------------------------------------------------------------------
-
-    def variables(self, kind: str) -> set[str]:
-        provided = set().union(*(s.provides() for s in self.sources)) if self.sources else set()
-        names = {n for n in provided if n in CATALOG}
-        if kind != "route":
-            names -= {n for n, v in CATALOG.items() if v.route_only}
-        return names
-
-    def _select(self, names: Sequence[str] | None) -> list[Source]:
-        if not names:
-            return self.sources
-        unknown = set(names) - {s.name for s in self.sources}
-        if unknown:
-            raise ValueError(f"unknown sources {sorted(unknown)}; available: {[s.name for s in self.sources]}")
-        return [s for s in self.sources if s.name in names]
-
-    def _run(self, query: Query, sql: str, sources: Sequence[str] | None, tz: tzinfo, kind: str,
-             windows: list[tuple[datetime, datetime]], distance_km: np.ndarray | None = None,
-             place_names: list[str] | None = None) -> dict:
-        sql = sql.strip().rstrip(";").strip()
-        if not sql:
-            raise ValueError("query is empty")
-        if len(sql) > MAX_SQL_CHARS:
-            raise ValueError(f"query longer than {MAX_SQL_CHARS} characters")
-        selected = self._select(sources)
-        self._check_size(query, kind, windows, len(selected))
-        variables = sorted(referenced_variables(sql, self.variables(kind)))
+    def forecast(self, text: str, gpx: str | None = None) -> dict:
+        """Answer a forecast query (weather_core.expr). Locations, times and models are part of the query; `gpx` is
+        a GPX document the query can refer to as route(gpx, …)."""
+        program = parse(text)
+        env = Env(tuple(s.name for s in self.sources), {s.name: s.provides() for s in self.sources},
+                  self.default_tz, gpx is not None)
+        compiled = compile_query(program, env)
+        resolved = {loc: self._resolve(loc, demand, gpx) for loc, demand in compiled.demands.items()}
+        for r in resolved.values():
+            cells = len(r.time) * math.prod(len(c) for c in r.space.values()) * ASSUMED_MEMBERS * len(r.sources)
+            if cells > MAX_ROWS:
+                raise ExprError(f"this query would load about {cells / 1e6:.0f}M values per variable (limit "
+                                f"{MAX_ROWS / 1e6:.0f}M); select fewer hours, a smaller area or fewer models")
+        def largest(dim: str) -> int:
+            return max((len(r.space[dim]) for r in resolved.values() if dim in r.space), default=1)
+        sizes = Sizes(len(self.sources), ASSUMED_MEMBERS, max(len(r.time) for r in resolved.values()),
+                      largest(POINT), largest(LAT), largest(LON))
+        estimate = compiled.estimate(sizes)
+        if estimate > self.eval_bytes:
+            raise ExprError(f"evaluating this query would need about {estimate / 2**20:.0f} MB (limit "
+                            f"{self.eval_bytes // 2**20} MB); reduce dimensions earlier, or select fewer hours, "
+                            f"a smaller area or fewer models")
 
         problems: list[dict] = []
-        prepared: list[tuple[Source, Prepared]] = []
+        fetched: dict[Location, list[tuple[Source, Prepared]]] = {}
         with self.budget.query() if self.budget is not None else nullcontext():
-            for source in selected:
-                p = _attempt(source, problems, lambda: source.prepare(query, variables))
-                if p is not None:
-                    prepared.append((source, p))
+            for loc, r in resolved.items():
+                for source in r.sources:
+                    p = _attempt(source, problems, lambda: source.prepare(r.query, r.variables))
+                    if p is not None:
+                        fetched.setdefault(loc, []).append((source, p))
 
-        cube = CubeData(variables, windows, query.lat, query.lon, distance_km, kind, tz, models=[],
-                        place_names=place_names)
-        models = []
+        warnings = list(compiled.warnings)
+        table: dict[tuple, dict] = {}
         attribution = []
-        for source, p in prepared:
-            model_id = len(cube.models)
-            leads = []
-            for w, window in enumerate(windows):
-                try:
-                    s = p.samples() if len(windows) == 1 else p.samples(window=window)
-                except OutsideForecast:
-                    continue  # this model doesn't reach this window; others may
-                cube.entries.append(ModelEntry(model_id, w, s))
-                leads += [(s.times[0] - p.run).total_seconds() / 3600, (s.times[-1] - p.run).total_seconds() / 3600]
-            if not leads:
-                problems.append({"source": source.name, "reason": "no window lies within this model's range"})
-                continue
-            description = source.describe()
-            cube.models.append({"model": source.name, "provider": p.info.provider, "run": p.run,
-                                "members": p.info.members, **description})
-            missing = sorted(set(variables) - source.provides())
-            models.append({
+        locations = {}
+        for loc, r in resolved.items():
+            per_model = []
+            for source, p in fetched.get(loc, []):
+                s = p.samples()
+                valid = [t for t, ok in zip(s.times, s.valid if s.valid is not None else [True] * len(s.times)) if ok]
+                if len(valid) < len(s.times):
+                    covered = [rt.format_time(t.timestamp() / 60, self.default_tz)
+                               for t in (valid[0], valid[-1] + timedelta(hours=1))]
+                    warnings.append(f"{source.name} covers only {covered[0]} to {covered[1]} of the selected time "
+                                    f"at {loc.describe()}")
+                per_model.append((source.name, s))
+                self._model_entry(table, source, p, valid, r.variables)
+                entry = _attribution(p)
+                if entry not in attribution:
+                    attribution.append(entry)
+            if not per_model:
+                raise QueryError(f"no model could provide data for {loc.describe()}: "
+                                 + "; ".join(f"{p['source']}: {p['reason']}" for p in problems))
+            locations[loc] = rt.location_data(per_model, r.variables, r.time, r.space, r.lat, r.lon)
+
+        with self._evaluating():
+            ctx = rt.Context(self.default_tz, self.eval_bytes, time.monotonic() + self.eval_timeout_s)
+            ctx.locations = locations
+            value = compiled.evaluate(ctx)
+            result = rt.encode(value, compiled.result.type, ctx, self.max_rows)
+        answer = {
+            "result": result,
+            "units": _units(compiled.result.type),
+            "warnings": warnings + ctx.warnings.messages,
+            "models": list(table.values()),
+            "unavailable_sources": problems,
+            "attribution": attribution,
+            "downloaded_mb": round(sum(p.bytes_downloaded for ps in fetched.values() for _, p in ps) / 1e6, 1),
+        }
+        summaries = [r.summary for r in resolved.values() if r.summary]
+        if summaries:
+            answer["locations"] = summaries
+        return answer
+
+    # -- internals -----------------------------------------------------------------------------------------------
+
+    @contextmanager
+    def _evaluating(self) -> Iterator[None]:
+        """Bound how many evaluations run at once (memory); waiting ones give up after busy_timeout_s."""
+        if not self._evaluations.acquire(timeout=self.busy_timeout_s):
+            raise QueryError("the server is busy with other queries; try again shortly")
+        try:
+            yield
+        finally:
+            self._evaluations.release()
+
+    def _resolve(self, loc: Location, demand: Demand, gpx: str | None) -> _Resolved:
+        sources = [s for s in self.sources if demand.models is None or s.name in demand.models]
+        variables = sorted(demand.variables)
+        if loc.kind == "route":
+            track, start, speed, use_times = loc.args[:-3], loc.args[-3], loc.args[-2], loc.args[-1]
+            points, track_times = self._route_points(track[1] if track[0] == "polyline" else None,
+                                                     gpx if track[0] == "gpx" else None)
+            departure = datetime.fromtimestamp(start * 60, timezone.utc)
+            self._check_range(departure, departure)
+            route = sample_route(points, departure, speed_kmh=None if use_times else speed,
+                                 track_times=track_times if use_times else None)
+            self._check_range(route.times[0], route.times[-1])
+            query = Query(route.lat, route.lon, times=route.times, dt_hours=route.dt_hours, bearing=route.bearing)
+            minutes = [t.timestamp() / 60 for t in route.times]
+            time_coord = rt.Coord(rt.labels(minutes), {"dt": np.asarray(route.dt_hours, dtype=np.float64),
+                                                       "distance_km": np.asarray(route.distance_km),
+                                                       "lat": np.asarray(route.lat), "lon": np.asarray(route.lon)},
+                                  "route")
+            summary = {"route": {"length_km": round(route.total_km, 1),
+                                 "start": self._format(route.times[0], self.default_tz),
+                                 "end": self._format(route.times[-1], self.default_tz),
+                                 "samples": len(route.times)}}
+            return _Resolved(query, time_coord, {}, sources, variables, summary=summary)
+
+        start = datetime.fromtimestamp(demand.start * 60, timezone.utc)
+        end = datetime.fromtimestamp(demand.end * 60, timezone.utc)
+        self._check_range(start, end)
+        first = start.replace(minute=0, second=0, microsecond=0)
+        first += timedelta(hours=1) if first < start else timedelta(0)
+        hours = []
+        while first + timedelta(hours=len(hours)) < end:
+            hours.append(first + timedelta(hours=len(hours)))
+        if not hours:
+            raise ExprError(f"{loc.describe()}: the selected time range contains no whole hour")
+        time_coord = rt.Coord(rt.labels(int(t.timestamp() // 60) for t in hours), {"dt": np.ones(len(hours))}, "1h")
+        space: dict[str, rt.Coord] = {}
+        summary: dict = {}
+        if loc.kind == "point":
+            lat, lon = loc.args
+            _check_point(lat, lon)
+            points = [LatLon(lat, lon)]
+        elif loc.kind == "points":
+            points = [LatLon(lat, lon) for _, lat, lon in loc.args]
+            if all(name for name, _, _ in loc.args):
+                names, points = _check_places([name for name, _, _ in loc.args], points)
+                extra = {"place": np.array(names, dtype=object)}
+            else:
+                for p in points:
+                    _check_point(p.lat, p.lon)
+                # Position and full coordinates: unique even for repeated points, and points of different
+                # locations only align where they really are the same point.
+                names, extra = [f"{i}:{p.lat!r},{p.lon!r}" for i, p in enumerate(points)], {}
+            space[POINT] = rt.Coord(rt.labels(names), {**extra, "lat": np.array([p.lat for p in points]),
+                                                       "lon": np.array([p.lon for p in points])})
+        else:
+            lats, lons = area_grid(loc.args, spacing_km=10.0, max_points=AREA_MAX_POINTS)
+            space = {LAT: rt.Coord(rt.labels(round(float(x), 4) for x in lats)),
+                     LON: rt.Coord(rt.labels(round(float(x), 4) for x in lons))}
+            points = [LatLon(float(a), float(b)) for a in lats for b in lons]  # lat-major, as location_data expects
+            summary = {"area": {"lat_points": len(lats), "lon_points": len(lons)}}
+        query = Query(np.array([p.lat for p in points]), np.array([p.lon for p in points]), area=bool(space),
+                      hours=hours)
+        lat, lon = (points[0].lat, points[0].lon) if loc.kind == "point" else (math.nan, math.nan)
+        return _Resolved(query, time_coord, space, sources, variables, lat, lon, summary)
+
+    @staticmethod
+    def _model_entry(table: dict, source: Source, p: Prepared, valid: list[datetime], variables: list[str]) -> None:
+        """Add one location's answer to the model table: one row per model and run (locations of one query may get
+        different runs, e.g. when a new run is published in between)."""
+        leads = [(valid[0] - p.run).total_seconds() / 3600, (valid[-1] - p.run).total_seconds() / 3600]
+        entry = table.get((source.name, p.run))
+        missing = sorted(set(variables) - source.provides())
+        if entry is None:
+            table[(source.name, p.run)] = {
                 "model": source.name,
                 "name": p.info.model,
                 "run": p.run.strftime("%Y-%m-%dT%H:%MZ"),
                 "members": p.info.members,
                 "lead_hours": [round(min(leads)), round(max(leads))],
-                **description,
+                **source.describe(),
                 **({"missing_variables": missing} if missing else {}),
-            })
-            attribution.append(_attribution(p))
-
-        if not cube.entries:
-            raise QueryError("no model could provide data for this query: "
-                             + "; ".join(f"{p['source']}: {p['reason']}" for p in problems))
-        result = self.engine.run(cube.setup(), cube.tables(), sql)
-        return {
-            "result": result,
-            "models": models,
-            "unavailable_sources": problems,
-            "attribution": attribution,
-            "downloaded_mb": round(sum(p.bytes_downloaded for _, p in prepared) / 1e6, 1),
-        }
-
-    def _check_size(self, query: Query, kind: str, windows: list[tuple[datetime, datetime]], n_sources: int):
-        if kind == "route":
-            samples = len(query.times)
-            points = 1
-        else:
-            # Two samples per model step (half-intervals); steps are at least hourly.
-            samples = sum(2 * (b - a).total_seconds() / 3600 + 2 for a, b in windows)
-            points = len(query.lat)
-        rows = samples * points * ASSUMED_MEMBERS * n_sources
-        if rows > MAX_ROWS:
-            raise ValueError(f"this query would load about {rows / 1e6:.0f}M rows (limit {MAX_ROWS / 1e6:.0f}M); "
-                             f"use a shorter window, a smaller area, or fewer candidate windows")
+            }
+            return
+        entry["lead_hours"] = [min(entry["lead_hours"][0], round(min(leads))),
+                               max(entry["lead_hours"][1], round(max(leads)))]
+        missing = sorted(set(entry.get("missing_variables", [])) | set(missing))
+        if missing:
+            entry["missing_variables"] = missing
 
     def _route_points(self, polyline: str | None, gpx: str | None):
         if (polyline is None) == (gpx is None):
@@ -273,33 +303,13 @@ class Forecaster:
         track = parse_gpx(gpx)
         return track.points, track.times
 
-    def _tz(self, text: str) -> tzinfo:
-        parsed = datetime.fromisoformat(text)
-        return parsed.tzinfo or self.default_tz
-
-    def _time(self, text: str) -> datetime:
-        try:
-            parsed = datetime.fromisoformat(text)
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=self.default_tz)
-            return parsed.astimezone(timezone.utc)
-        except (ValueError, OverflowError):
-            raise ValueError(f"invalid time {text!r}; use ISO 8601 like 2026-10-10T10:00") from None
-
     def _check_range(self, a: datetime, b: datetime) -> None:
         now = self.clock()
         if a < now - MAX_PAST or b > now + MAX_AHEAD:
             raise ValueError(f"times must lie between {MAX_PAST.days} days ago and {MAX_AHEAD.days} days ahead; "
                              f"ensembles don't forecast further")
         if b - a > MAX_WINDOW:
-            raise ValueError(f"window longer than {MAX_WINDOW.days} days")
-
-    def _window(self, start: str, end: str) -> tuple[datetime, datetime]:
-        a, b = self._time(start), self._time(end)
-        if b <= a:
-            raise ValueError("end must be after start")
-        self._check_range(a, b)
-        return a, b
+            raise ValueError(f"time range longer than {MAX_WINDOW.days} days")
 
     @staticmethod
     def _format(t: datetime, tz: tzinfo) -> str:
@@ -307,7 +317,18 @@ class Forecaster:
 
 
 def _attribution(p: Prepared) -> dict:
-    return p.attribution([p.query.window[0], p.query.window[1]] if p.query.window else p.query.times)
+    return p.attribution(p.query.hours if p.query.hours is not None else p.query.times)
+
+
+def _units(t: Type):
+    """Unit of each answer value ("" = dimensionless, e.g. probabilities); None for labels."""
+    if t.kind == RECORD:
+        return {k: _units(f) for k, f in t.fields}
+    if t.kind == LABEL:
+        return None
+    if t.kind == BOOL or t.unit is None:
+        return ""
+    return str(t.unit)
 
 
 def _check_point(lat: float, lon: float) -> None:
@@ -315,24 +336,14 @@ def _check_point(lat: float, lon: float) -> None:
         raise ValueError("lat must be within ±90 and lon within ±180 degrees")
 
 
-def _parse_places(text: str) -> tuple[list[str], list[LatLon]]:
-    """"Cologne@50.94,6.96; Bonn@50.73,7.10" → names and points."""
-    names, points = [], []
-    for part in (p.strip() for p in text.split(";")):
-        if not part:
-            continue
-        name, at, coords = part.rpartition("@")
-        try:
-            lat_text, lon_text = coords.split(",")
-            point = LatLon(float(lat_text), float(lon_text))
-        except ValueError:
-            raise ValueError(f"places must look like 'Name@lat,lon; Other@lat,lon', got {part!r}") from None
+def _check_places(names: list[str], points: list[LatLon]) -> tuple[list[str], list[LatLon]]:
+    """Validate places; names are normalised (whitespace, length, a default for empty ones)."""
+    names = list(names)
+    for i, point in enumerate(points):
         _check_point(point.lat, point.lon)
-        name = " ".join((name if at else coords).split())[:60] or f"place {len(names) + 1}"
-        if not name.isprintable():
+        names[i] = " ".join(names[i].split())[:60] or f"place {i + 1}"
+        if not names[i].isprintable():
             raise ValueError("place names must be printable text")
-        names.append(name)
-        points.append(point)
     if not points:
         raise ValueError("places is empty")
     if len(points) > MAX_PLACES:

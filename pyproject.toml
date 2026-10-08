@@ -85,7 +85,6 @@ runtime = [
     "io.micronaut:micronaut-http-client",
     "io.micronaut:micronaut-http-server-netty",
     "edu.ucar:grib:5.11.0",
-    "org.duckdb:duckdb_jdbc:1.5.6.0",
 ]
 build = [
     "io.micronaut.serde:micronaut-serde-processor",

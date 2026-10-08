@@ -3,12 +3,12 @@
 Every variable is an array with the dimensions ``("member", "time")`` or ``("member", "time", "space")``:
 
 - ``member``: ensemble members of one model run.
-- ``time``: samples along the query, in chronological order. For a point query these are the model steps
-  overlapping the window. For a route they are space-time samples: each one is where the rider is at that time.
+- ``time``: samples along the query, in chronological order: whole hours, or for a route space-time samples (each
+  one is where the rider is at that time).
 - ``space``: optional, for area queries (grid points inside the area).
 
 ``dt_hours[t]`` is the duration each time sample stands for. Time aggregations weight by it, so
-``sum(precip)`` is the window total in mm, whatever the step length.
+``sum(precip)`` is the total in mm, whatever the sample length.
 """
 
 from dataclasses import dataclass, field

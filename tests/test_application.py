@@ -90,6 +90,7 @@ def test_mcp_path_without_key(my_context):
     response = post("/mcp")
     assert response.statusCode() == 200, response.body()
     assert "forecast" in response.body()
+    assert "weather_query_help" in response.body()
     assert post("/mcp/" + "k" * 40).statusCode() == 404
 
 

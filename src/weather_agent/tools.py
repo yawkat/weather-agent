@@ -7,7 +7,7 @@ from typing import Annotated
 
 from jakarta.inject import Singleton
 from micronaut.mcp.annotations import Tool, ToolArg
-from weather_core.cube import describe_schema
+from weather_core.expr.help import describe_language
 from weather_core.sources.base import SourceError
 
 from .forecast_service import ForecastService
@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 def _run(fn: Callable[[], dict]) -> str:
     try:
         return json.dumps(fn(), ensure_ascii=False)
-    except (SourceError, ValueError) as e:  # includes QueryError: bad SQL, timeouts, limits
+    except (SourceError, ValueError) as e:  # includes QueryError/ExprError: bad queries, timeouts, limits
         return json.dumps({"error": str(e)}, ensure_ascii=False)
     except BaseException as e:  # Java exceptions surface here as foreign exceptions, not Python Exceptions
         if isinstance(e, (KeyboardInterrupt, SystemExit, GeneratorExit)):
@@ -32,63 +32,31 @@ def _run(fn: Callable[[], dict]) -> str:
         return json.dumps({"error": f"internal error (reference {reference})"}, ensure_ascii=False)
 
 
-def _sources(value: str | None) -> list[str] | None:
-    return [s.strip() for s in value.split(",") if s.strip()] if value else None
-
-
-def _bbox(value: str | None) -> list[float] | None:
-    if not value:
-        return None
-    parts = value.split(",")
-    try:
-        box = [float(x) for x in parts]
-    except ValueError:
-        box = []
-    if len(box) != 4:
-        raise ValueError(f"bbox must be four comma-separated numbers south,west,north,east, got {value!r}")
-    return box
-
-
 @Singleton
 class ForecastTools:
     def __init__(self, service: ForecastService):
         self.forecaster = service.forecaster
 
-    @Tool(description="Schema, columns, helper macros and example SQL for the forecast tool. Read this before the "
-                      "first forecast query.")
+    @Tool(description="Reference for forecast queries: the dataset, its dimensions and variables, selecting "
+                      "locations and times, reductions, and examples. Read this before the first forecast query.")
     def weather_query_help(self) -> str:
-        return describe_schema()
+        return describe_language()
 
-    @Tool(description="Ensemble weather forecast: run a DuckDB SQL query over every model's members for one "
-                      "location form (exactly one): a point (lat, lon), named places (places), an area (lat, lon, "
-                      "radius_km, or bbox) or a route (polyline/gpx with speed_kmh or use_gpx_times; start is the "
-                      "departure). Views: samples, per_member, models. With window_hours, start..end is a search "
-                      "range and every hourly window of that length is loaded (window_start/window_end), so the "
-                      "query can rank windows. Returns the result, a per-model table (run, lead hours, members, "
-                      "notes) and attribution. Results are per model; compare them yourself. Read "
-                      "weather_query_help first.")
+    @Tool(description="Ensemble weather forecast queried with a subset of xarray (Python syntax) over one dataset, "
+                      "forecast(), with dimensions model, member, time, lat and lon. The query picks its location "
+                      "(.interp(lat=…, lon=…), .interp(places(…)), .interp(route(…)) or an area with "
+                      ".sel(lat=slice(…), lon=slice(…))), its times and models with .sel(…), and reduces dimensions "
+                      "explicitly, e.g. (forecast().interp(lat=50.94, lon=6.96).sel(time=slice('2026-10-10T10:00', "
+                      "'2026-10-10T16:00')).precip.sum('time') < 0.5).mean('member') gives each model's probability "
+                      "of a dry afternoon. Returns the answer, its units, warnings about likely mistakes, a "
+                      "per-model table (run, lead hours, members) and attribution. Read weather_query_help first.")
     def forecast(self,
-                 query: Annotated[str, ToolArg(description="DuckDB SQL, e.g. SELECT model, prob(rain < 0.5 AND tmax <= 26) AS p FROM per_member GROUP BY model")],
-                 start: Annotated[str, ToolArg(description="Window start (route: departure), ISO 8601 local time, e.g. 2026-10-10T10:00 (Europe/Berlin unless an offset is given)")],
-                 end: Annotated[str | None, ToolArg(description="Window end, ISO 8601 local time; required except for routes")] = None,
-                 lat: Annotated[float | None, ToolArg(description="Point latitude, or circle centre with radius_km")] = None,
-                 lon: Annotated[float | None, ToolArg(description="Point longitude, or circle centre with radius_km")] = None,
-                 places: Annotated[str | None, ToolArg(description="Several named points: 'Cologne@50.94,6.96; Bonn@50.73,7.10' (max 20); adds a place column")] = None,
-                 radius_km: Annotated[float | None, ToolArg(description="Area: circle radius in km around lat/lon")] = None,
-                 bbox: Annotated[str | None, ToolArg(description="Area: south,west,north,east")] = None,
-                 polyline: Annotated[str | None, ToolArg(description="Route as encoded polyline (precision 5); see describe_route")] = None,
-                 gpx: Annotated[str | None, ToolArg(description="Route as GPX document text")] = None,
-                 speed_kmh: Annotated[float | None, ToolArg(description="Route: average speed in km/h")] = None,
-                 use_gpx_times: Annotated[bool | None, ToolArg(description="Route: pace by the GPX timestamps (shifted to start) instead of a speed")] = None,
-                 window_hours: Annotated[float | None, ToolArg(description="Load every hourly window of this length within start..end (not for routes)")] = None,
-                 sources: Annotated[str | None, ToolArg(description="Optional comma-separated model names to restrict to (default: all)")] = None) -> str:
-        return _run(lambda: self.forecaster.forecast(
-            query, start, end, lat=lat, lon=lon, places=places, radius_km=radius_km, bbox=_bbox(bbox),
-            polyline=polyline, gpx=gpx, speed_kmh=speed_kmh, use_gpx_times=bool(use_gpx_times),
-            window_hours=window_hours, sources=_sources(sources)))
+                 query: Annotated[str, ToolArg(description="The query; see weather_query_help")],
+                 gpx: Annotated[str | None, ToolArg(description="Optional GPX document; the query refers to it as route(gpx, start=…, …)")] = None) -> str:
+        return _run(lambda: self.forecaster.forecast(query, gpx=gpx))
 
     @Tool(description="Summarise a route from GPX text or a polyline: length, bounding box, duration at a speed, "
-                      "and a compact encoded polyline to pass to forecast_route instead of the full GPX.")
+                      "and a compact encoded polyline to use in forecast queries (route(polyline=…)) instead of the full GPX.")
     def describe_route(self,
                        polyline: Annotated[str | None, ToolArg(description="Encoded polyline (precision 5)")] = None,
                        gpx: Annotated[str | None, ToolArg(description="GPX document text")] = None,
@@ -105,8 +73,8 @@ class PlaceTools:
                       "complete names, ideally with region or country ('Freiburg im Breisgau', 'Bonn, Germany'), "
                       "not prefixes to autocomplete. Several names separated by ';' (max 10). Each result has lat, "
                       "lon, the matched label (check it is the place you meant) and a 'place' string for "
-                      "forecast(places=...). Uncached names take about a second each. Credit the attribution when "
-                      "showing results.")
+                      "forecast().interp(places('…')) in queries. Uncached names take about a second each. Credit "
+                      "the attribution when showing results.")
     def resolve_place(self,
                       query: Annotated[str, ToolArg(description="Place name(s), e.g. 'Cologne, Germany; Bonn, Germany'")]) -> str:
         return _run(lambda: self.geocoder.resolve_many(query))

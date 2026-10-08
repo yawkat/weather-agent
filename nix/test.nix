@@ -1,5 +1,5 @@
 # VM test: the service configured the way a host config (e.g. goliath) would, starting, serving MCP and running
-# Python tool code (weather_core, numpy). The VM has no network, so forecasts (downloads, GRIB decoding, DuckDB)
+# Python tool code (weather_core, numpy). The VM has no network, so forecasts (downloads, GRIB decoding)
 # aren't covered here.
 { pkgs, weather-agent }:
 let

@@ -5,15 +5,15 @@ Model output comes in two kinds:
 - *interval* variables (precipitation, gust maxima, radiation) describe the period ending at a step;
 - *instant* variables (temperature, wind, cloud) are values at a step.
 
-A point window [start, end] is cut at the model steps inside it. Each piece is split in two halves; interval
-variables keep the piece's rate in both halves, and instant variables take their value at the half's outer end
-(a model step or a window edge). So min()/max() see every model value inside the window, not just
-interpolated midpoints, while sum()/hours() still integrate exactly over the window. Route samples (individual
-times) take the interval containing them, or interpolate instants to their time.
+Queries sample whole hours (sample_hours): each sample stands for the hour starting at its label. Interval
+variables take the rate of the step interval containing the hour, instants their value at the label (interpolated
+between steps, so 3- and 6-hourly models are on the same hourly axis and their step values stay on it). Route
+samples (individual times, sample_times) take the interval containing them, or interpolate instants to their
+time.
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import numpy as np
 
@@ -25,7 +25,8 @@ class StepSampling:
     instant_lo: np.ndarray  # index into `steps`
     instant_weight_hi: np.ndarray  # weight of instant_lo + 1
     dt_hours: np.ndarray
-    times: list[datetime]  # representative time of each sample (midpoint for windows)
+    times: list[datetime]  # time of each sample (hourly: the start of its hour)
+    valid: np.ndarray | None = None  # per sample: within the run's steps (sample_hours only; else all are)
 
     def needed_steps(self) -> set[int]:
         """Step indices whose fields must be available."""
@@ -77,28 +78,6 @@ def _instant(steps_arr: np.ndarray, hours: float) -> tuple[int, float]:
     return lo, float((hours - steps_arr[lo]) / (steps_arr[hi] - steps_arr[lo]))
 
 
-def sample_window(run: datetime, steps: list[int], start: datetime, end: datetime) -> StepSampling:
-    """Samples covering [start, end] for a source whose output steps (hours after `run`) are `steps`."""
-    if end <= start:
-        raise ValueError("window end must be after its start")
-    a, b = _hours(run, start), _hours(run, end)
-    _check_range(steps, a, b)
-    steps_arr = np.asarray(steps, dtype=np.float64)
-    interval_step, lo, w_hi, dt, times = [], [], [], [], []
-    for k in range(1, len(steps)):
-        piece_start, piece_end = max(steps_arr[k - 1], a), min(steps_arr[k], b)
-        if piece_end <= piece_start:
-            continue
-        for anchor in (piece_start, piece_end):
-            i, w = _instant(steps_arr, anchor)
-            interval_step.append(k)
-            lo.append(i)
-            w_hi.append(w)
-            dt.append((piece_end - piece_start) / 2)
-            times.append(run + timedelta(hours=float(anchor)))
-    return StepSampling(np.array(interval_step), np.array(lo), np.array(w_hi), np.array(dt), times)
-
-
 def sample_times(run: datetime, steps: list[int], times: list[datetime], dt_hours: np.ndarray) -> StepSampling:
     """Samples at individual times (route samples)."""
     hours = np.array([_hours(run, t) for t in times])
@@ -108,3 +87,19 @@ def sample_times(run: datetime, steps: list[int], times: list[datetime], dt_hour
     lo, w_hi = zip(*(_instant(steps_arr, h) for h in hours))
     return StepSampling(interval_step, np.array(lo), np.array(w_hi), np.asarray(dt_hours, dtype=np.float64),
                         list(times))
+
+
+def sample_hours(run: datetime, steps: list[int], hours: list[datetime]) -> StepSampling:
+    """One sample per hour, labelled by the hour's start: interval variables take the step interval containing the
+    hour, instants their value at the label. Hours the run doesn't cover are marked invalid (not an error), so a
+    model can answer for the part of a range it reaches."""
+    steps_arr = np.asarray(steps, dtype=np.float64)
+    starts = np.array([_hours(run, t) for t in hours])
+    valid = (starts >= steps_arr[0]) & (starts + 1 <= steps_arr[-1])
+    if not valid.any():
+        raise OutsideForecast(f"hours +{starts.min():.0f}h…+{starts.max():.0f}h of the run; the forecast covers "
+                              f"+{steps[0]}h…+{steps[-1]}h")
+    starts = np.clip(starts, steps_arr[0], steps_arr[-1] - 1)  # invalid hours: any index in range, masked later
+    interval_step = np.clip(np.searchsorted(steps_arr, starts + 0.5, side="left"), 1, len(steps) - 1)
+    lo, w_hi = zip(*(_instant(steps_arr, h) for h in starts))
+    return StepSampling(interval_step, np.array(lo), np.array(w_hi), np.ones(len(hours)), list(hours), valid)

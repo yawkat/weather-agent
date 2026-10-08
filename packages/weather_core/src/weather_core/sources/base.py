@@ -1,7 +1,7 @@
 """Common source machinery: queries, I/O interfaces, and turning cached fields into Samples."""
 
 from collections.abc import Callable, Collection
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
@@ -9,7 +9,7 @@ import numpy as np
 
 from ..evaluate import SourceInfo
 from ..samples import Samples
-from ..timeaxis import StepSampling, sample_times, sample_window
+from ..timeaxis import StepSampling, sample_hours, sample_times
 from ..variables import derive
 
 
@@ -41,14 +41,14 @@ class Decoder(Protocol):
 
 @dataclass(frozen=True)
 class Query:
-    """Where and when to sample. Either a window (point/area) or explicit sample times (route)."""
+    """Where and when to sample: whole hours at points (hours), or explicit sample times along a route (times)."""
     lat: np.ndarray
     lon: np.ndarray
-    window: tuple[datetime, datetime] | None = None
+    hours: list[datetime] | None = None  # one sample per hour (see sample_hours)
     times: list[datetime] | None = None  # route: one time per point
     dt_hours: np.ndarray | None = None  # route: riding time per point
     bearing: np.ndarray | None = None  # route: direction of travel per point
-    area: bool = False  # points are an area to aggregate over (space dimension)
+    area: bool = False  # several points: keep the space dimension
 
     @property
     def is_route(self) -> bool:
@@ -62,15 +62,12 @@ class SourceSamples:
     times: list[datetime]
     bytes_downloaded: int = 0
     attribution: dict = field(default_factory=dict)
+    valid: np.ndarray | None = None  # per sample, for hourly queries: the run covers it (else values are NaN)
 
 
 @dataclass
 class Prepared:
-    """Point values of every model step a query range needs, loaded once.
-
-    `samples()` builds Samples for the whole query, or for any sub-window of it with that window's exact bounds
-    (best-window search), without touching the cache or network again.
-    """
+    """Point values of every model step a query needs, loaded once; `samples()` turns them into Samples."""
     query: Query
     run: datetime
     steps: list[int]
@@ -81,22 +78,32 @@ class Prepared:
     bytes_downloaded: int
     attribution: Callable[[list[datetime]], dict]
 
-    def samples(self, window: tuple[datetime, datetime] | None = None) -> SourceSamples:
-        query = self.query if window is None else replace(self.query, window=window)
-        sampling = sampling_for(query, self.run, self.steps)
-        samples = assemble(query, sampling, self.base_per_step, self.interval_vars, self.unavailable)
-        downloaded = self.bytes_downloaded if window is None else 0
-        return SourceSamples(samples, self.info, sampling.times, downloaded, self.attribution(sampling.times))
+    def samples(self) -> SourceSamples:
+        sampling = sampling_for(self.query, self.run, self.steps)
+        samples = assemble(self.query, sampling, self.base_per_step, self.interval_vars, self.unavailable)
+        return SourceSamples(samples, self.info, sampling.times, self.bytes_downloaded,
+                             self.attribution(sampling.times), sampling.valid)
 
 
 class SourceError(Exception):
     """A source can't answer this query (out of range, outside domain, data not published yet)."""
 
 
+def runs_by_coverage(candidates: list[datetime], sampling: Callable[[datetime], StepSampling | None]) -> list:
+    """(run, sampling) for candidates that cover the query: those covering every sample first (newest first), then
+    those covering part of it. `sampling` returns None for runs that don't cover it at all."""
+    full, partial = [], []
+    for run in candidates:
+        s = sampling(run)
+        if s is not None:
+            (full if s.valid is None or s.valid.all() else partial).append((run, s))
+    return full + partial
+
+
 def sampling_for(query: Query, run: datetime, steps: list[int]) -> StepSampling:
     if query.is_route:
         return sample_times(run, steps, query.times, query.dt_hours)
-    return sample_window(run, steps, *query.window)
+    return sample_hours(run, steps, query.hours)
 
 
 def assemble(query: Query, sampling: StepSampling, base_per_step: dict[str, dict[int, np.ndarray]],
@@ -113,6 +120,9 @@ def assemble(query: Query, sampling: StepSampling, base_per_step: dict[str, dict
         values = extract(per_step, diagonal=query.is_route)
         if not query.is_route and not query.area:
             values = values[:, :, 0]
+        if sampling.valid is not None and not sampling.valid.all():
+            values = np.array(values, dtype=np.float64)
+            values[:, ~sampling.valid] = np.nan
         arrays[name] = values
     bearing = query.bearing if query.is_route else None
     variables = derive(arrays, bearing=bearing)

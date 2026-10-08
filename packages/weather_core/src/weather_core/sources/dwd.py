@@ -30,7 +30,8 @@ from ..evaluate import SourceInfo
 from ..grid import EUROPE, Region, UnstructuredGrid
 from ..store import FieldStore, atomic_replace
 from ..timeaxis import OutsideForecast
-from .base import NEEDS, Decoder, Download, Fetcher, Prepared, Query, SourceError, SourceSamples, sampling_for, step_list
+from .base import (NEEDS, Decoder, Download, Fetcher, Prepared, Query, SourceError, SourceSamples, runs_by_coverage,
+                   sampling_for, step_list)
 
 log = logging.getLogger(__name__)
 
@@ -194,12 +195,13 @@ class DwdIconSource:
             del self._listings[key]
         steps = self.model.steps()
         probe = sorted(params) or ["T_2M"]
-        for run in candidates:
+        def sampling(run):
             try:
-                sampling = sampling_for(query, run, steps)
+                return sampling_for(query, run, steps)
             except OutsideForecast:
-                continue
-            last_step = steps[max(sampling.needed_steps())]
+                return None
+        for run, s in runs_by_coverage(candidates, sampling):
+            last_step = steps[max(s.needed_steps())]
             if all(last_step in self._listing(run, p) for p in probe):
                 return run
         raise SourceError(f"{self.model.model}: no published run covers this time")
