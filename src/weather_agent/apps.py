@@ -5,9 +5,10 @@ import json
 from at.yawk.weatheragent import McpApps, McpAppTool
 from jakarta.inject import Singleton
 from micronaut.mcp.annotations import Resource
+from weather_core.expr.redact import Redacted
 
 from .forecast_service import ForecastService
-from .tools import _run
+from .tools import _forecast_summary, _run
 
 VIEW_URI = "ui://weather-agent/forecast.html"
 
@@ -58,18 +59,26 @@ class ForecastView(McpAppTool):
         return VIEW_URI
 
     def call(self, arguments: str) -> str:
-        def run() -> dict:
+        try:
             args = json.loads(arguments)
-            query, title, gpx = (args.get(k) for k in ("query", "title", "gpx"))
-            if not isinstance(query, str) or not isinstance(title, (str, type(None))) \
-                    or not isinstance(gpx, (str, type(None))):
+        except ValueError:
+            args = None
+        query, title, gpx = (args.get(k) for k in ("query", "title", "gpx")) if isinstance(args, dict) \
+            else (None, None, None)
+        valid = isinstance(query, str) and isinstance(title, (str, type(None))) and isinstance(gpx, (str, type(None)))
+        redacted = Redacted(query, keep=(s.name for s in self.forecaster.sources)) if valid else None
+        call = f"show_forecast {redacted}" + (f" (gpx: {len(gpx)} characters)" if gpx is not None else "") \
+            if valid else "show_forecast (invalid arguments)"
+
+        def run() -> dict:
+            if not valid:
                 raise ValueError("query, title and gpx must be strings")
             answer, chart = self.forecaster.visualize(query, gpx=gpx)
             chart["title"] = " ".join((title or "").split())[:MAX_TITLE]
             chart["query"] = query
             answer = {"display": "The user sees this answer as an interactive chart.", **answer}
             return {"text": json.dumps(answer, ensure_ascii=False), "structuredContent": chart}
-        return _run(run)
+        return _run(run, call, redacted, lambda r: _forecast_summary(json.loads(r["text"])))
 
     @Resource(uri="ui://weather-agent/forecast.html", name="forecast-chart", title="Forecast chart",
               mimeType="text/html;profile=mcp-app")
