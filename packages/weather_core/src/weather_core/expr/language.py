@@ -1100,9 +1100,11 @@ class _Compiler:
             if other is not None:
                 parts.append(self.array(other, NUM, BOOL))
             typ = self.combine(parts, node, "other")
+            # The value branches must agree in unit (the condition's doesn't matter), as in np.where.
+            unit = self.combine([x, parts[2]], node, "same").unit if other is not None else t.unit
             kind = t.kind if other is None or parts[2].type.kind == t.kind else NUM
             fn = (lambda a, c: rt.where(c, a, np.nan)) if other is None else (lambda a, c, o: rt.where(c, a, o))
-            return Elementwise(fn, parts, Type(kind, typ.dims, t.unit if kind == NUM else NO_UNIT, False, typ.time))
+            return Elementwise(fn, parts, Type(kind, typ.dims, unit if kind == NUM else NO_UNIT, False, typ.time))
         if method == "clip":
             self.only(node, kwargs, ("min", "max"))
             if len(args) > 2:
@@ -1153,7 +1155,10 @@ class _Compiler:
             return Pending(x, "bins", edges, node)
         if method in ("idxmax", "idxmin"):
             self.only(node, kwargs, ("dim",))
-            (dim,) = self.dims_argument(node, x, args, kwargs, method)[:1]
+            dims = self.dims_argument(node, x, args, kwargs, method)
+            if len(dims) != 1:
+                raise _error(node, f"{method}() takes exactly one dimension")
+            (dim,) = dims
             keep = tuple(d for d in t.dims if d != dim)
             return Idx(x, dim, method == "idxmax", Type(LABEL, keep, None, False, t.time if dim != TIME else None,
                                                         label_dim=dim))
@@ -1184,7 +1189,10 @@ class _Compiler:
             values = [_integer(a, "range argument") for a in node.args]
             if not 1 <= len(values) <= 3 or (len(values) == 3 and values[2] <= 0):
                 raise _error(node, "range(start, stop, step)")
-            edges = [float(v) for v in range(*values)][:MAX_BINS + 2]
+            start, stop, step = (0, values[0], 1) if len(values) == 1 else (*values, 1)[:3]
+            if -(-(stop - start) // step) > MAX_BINS + 1:  # count before materialising the range
+                raise _error(node, f"bins: 2 to {MAX_BINS + 1} increasing edges")
+            edges = [float(v) for v in range(start, stop, step)]
         elif isinstance(node, (ast.List, ast.Tuple)):
             edges = [_number(e, "bin edge") for e in node.elts]
         else:

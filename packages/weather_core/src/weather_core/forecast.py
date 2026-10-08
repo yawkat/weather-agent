@@ -154,28 +154,29 @@ class Forecaster:
         warnings = list(compiled.warnings)
         table: dict[tuple, dict] = {}
         attribution = []
-        locations = {}
-        for loc, r in resolved.items():
-            per_model = []
-            for source, p in fetched.get(loc, []):
-                s = p.samples()
-                valid = [t for t, ok in zip(s.times, s.valid if s.valid is not None else [True] * len(s.times)) if ok]
-                if len(valid) < len(s.times):
-                    covered = [rt.format_time(t.timestamp() / 60, self.default_tz)
-                               for t in (valid[0], valid[-1] + timedelta(hours=1))]
-                    warnings.append(f"{source.name} covers only {covered[0]} to {covered[1]} of the selected time "
-                                    f"at {loc.describe()}")
-                per_model.append((source.name, s))
-                self._model_entry(table, source, p, valid, r.variables)
-                entry = _attribution(p)
-                if entry not in attribution:
-                    attribution.append(entry)
-            if not per_model:
-                raise QueryError(f"no model could provide data for {loc.describe()}: "
-                                 + "; ".join(f"{p['source']}: {p['reason']}" for p in problems))
-            locations[loc] = rt.location_data(per_model, r.variables, r.time, r.space, r.lat, r.lon)
-
+        # Hold the permit from building the arrays on: waiting queries keep nothing but the prepared fields.
         with self._evaluating():
+            locations = {}
+            for loc, r in resolved.items():
+                per_model = []
+                for source, p in fetched.get(loc, []):
+                    s = p.samples()
+                    valid = [t for t, ok in zip(s.times, s.valid if s.valid is not None else [True] * len(s.times))
+                             if ok]
+                    if len(valid) < len(s.times):
+                        covered = [rt.format_time(t.timestamp() / 60, self.default_tz)
+                                   for t in (valid[0], valid[-1] + timedelta(hours=1))]
+                        warnings.append(f"{source.name} covers only {covered[0]} to {covered[1]} of the selected "
+                                        f"time at {loc.describe()}")
+                    per_model.append((source.name, s))
+                    self._model_entry(table, source, p, valid, r.variables)
+                    entry = p.attribution(valid)  # only the hours the run really covers
+                    if entry not in attribution:
+                        attribution.append(entry)
+                if not per_model:
+                    raise QueryError(f"no model could provide data for {loc.describe()}: "
+                                     + "; ".join(f"{p['source']}: {p['reason']}" for p in problems))
+                locations[loc] = rt.location_data(per_model, r.variables, r.time, r.space, r.lat, r.lon)
             ctx = rt.Context(self.default_tz, self.eval_bytes, time.monotonic() + self.eval_timeout_s)
             ctx.locations = locations
             value = compiled.evaluate(ctx)
@@ -314,10 +315,6 @@ class Forecaster:
     @staticmethod
     def _format(t: datetime, tz: tzinfo) -> str:
         return t.astimezone(tz).isoformat(timespec="minutes")
-
-
-def _attribution(p: Prepared) -> dict:
-    return p.attribution(p.query.hours if p.query.hours is not None else p.query.times)
 
 
 def _units(t: Type):

@@ -178,7 +178,9 @@ def reduce(ctx: Context, a: Arr, dims: list[str], how: str) -> Arr:
 
 def _move_last(a: Arr, keep: list[str], dims: list[str]) -> np.ndarray:
     x = np.transpose(a.data, [a.axis(d) for d in keep + list(dims)])
-    return x.reshape([a.data.shape[a.axis(d)] for d in keep] + [-1])
+    # The reduced size explicitly: -1 can't be inferred when an axis is empty.
+    reduced = int(np.prod([a.data.shape[a.axis(d)] for d in dims], dtype=np.int64))
+    return x.reshape([a.data.shape[a.axis(d)] for d in keep] + [reduced])
 
 
 def _reduce_last(x: np.ndarray, how: str, weights: np.ndarray | None = None) -> np.ndarray:
@@ -214,6 +216,8 @@ def quantiles_last(x: np.ndarray, levels: list[float]) -> np.ndarray:
 
     Sort-based: np.nanquantile falls back to a per-slice loop that takes seconds on padded member axes.
     """
+    if x.shape[-1] == 0:  # e.g. after isel(member=[])
+        return np.full(x.shape[:-1] + (len(levels),), np.nan)
     s = np.sort(x, axis=-1)  # NaN sorts last
     n = (~np.isnan(x)).sum(axis=-1)
     top = np.maximum(n - 1, 0)
@@ -334,6 +338,9 @@ def idx(ctx: Context, a: Arr, dim: str, largest: bool) -> Arr:
     """Label (as an index into the dimension's labels) of the largest/smallest value along `dim`."""
     ctx.charge(a.data.shape)
     x = np.moveaxis(a.data, a.axis(dim), -1)
+    keep = tuple(d for d in a.dims if d != dim)
+    if x.shape[-1] == 0:
+        return Arr(np.full(x.shape[:-1], np.nan), keep, {d: a.coords[d] for d in keep}, a.coords[dim])
     filled = np.where(np.isnan(x), -np.inf if largest else np.inf, x)
     index = (filled.argmax(axis=-1) if largest else filled.argmin(axis=-1)).astype(np.float64)
     keep = tuple(d for d in a.dims if d != dim)

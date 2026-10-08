@@ -403,6 +403,35 @@ def test_distance_from_a_located_array():
     assert by_model(far["result"]) == {"synthetic": None}
 
 
+def test_review_edge_cases():
+    # A huge range() for bins is refused without being materialised.
+    line = encode_polyline([LatLon(50.0, 7.0), LatLon(50.27, 7.0)])
+    with pytest.raises(ExprError, match="bins"):
+        ask(f'forecast().interp(route(polyline="{line}", start="2026-10-08T10:00", speed_kmh=20)).t2m'
+            '.groupby_bins("distance_km", bins=range(0, 1000000000000)).max()')
+    # where()'s value branches are unit-checked like np.where's.
+    mixed = ask(WX + 'wx.t2m.where(wx.precip > 0.1, wx.precip).max(["member", "time"])')
+    assert any("°C and mm/h" in w for w in mixed["warnings"])
+    # idxmax over several dimensions is refused instead of reducing only the first.
+    with pytest.raises(ExprError, match="exactly one dimension"):
+        ask(WX + 'wx.t2m.idxmax(["time", "member"])')
+    # Empty selections give missing values, not internal errors.
+    empty = ask(WX + '{"q": wx.t2m.isel(member=[]).quantile(0.5, "member").max("time"), '
+                     '"i": wx.t2m.isel(time=slice(0, 0)).max("member").idxmax("time")}')
+    assert rows(empty["result"]) == [{"model": "synthetic", "q": None, "i": None}]
+
+
+def test_attribution_covers_only_the_hours_a_run_has():
+    class Recording(Synthetic):
+        def prepare(self, query, variables):
+            p = super().prepare(query, variables)
+            p.attribution = lambda times: {"model": self.name, "until": times[-1].isoformat()}
+            return p
+    answer = ask('wx = forecast().interp(lat=50, lon=7).sel(time=slice("2026-10-09T22:00", "2026-10-10T02:00"))\n'
+                 'wx.t2m.count("time").max("member")', Recording())
+    assert answer["attribution"] == [{"model": "synthetic", "until": "2026-10-09T23:00:00+00:00"}]
+
+
 def test_huge_numbers_do_not_hang():
     assert by_model(ask(WX + '(wx.t2m.min("time") ** 10 ** 10 ** 10 > 1).mean("member")')["result"]) == \
         {"synthetic": 1.0}
