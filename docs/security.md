@@ -58,10 +58,12 @@ failures are reported by exception type only.
 ## Query log
 
 Every tool call is logged at INFO with its outcome and duration, without what locates the caller
-(`weather_core/expr/redact.py`): forecast queries keep their shape, times, models and thresholds, but coordinates
-become `...`, place names, polylines and other unknown strings `'s1'`, and binding names `v1`. Error and warning
-messages are scrubbed of the query's hidden strings, quoted strings and decimals. Place lookups and routes log
-only counts and sizes. Tracebacks of unexpected errors are not redacted.
+(`weather_core/expr/redact.py`). Forecast queries are parsed and logged as a redacted syntax tree: they keep their
+shape, times, models and thresholds, but coordinates become `...`, place names, polylines and other unknown
+strings `'s1'`, and names the language doesn't know (bindings, attributes, keywords) `v1`, `a1`, `k1`. Error and
+warning messages are never logged, since they may quote locations: a rejected query logs the error type and the
+redacted node it points to, and warnings only their count. Place lookups and routes log only counts and sizes.
+Tracebacks of unexpected errors are not redacted.
 
 ## Known gaps
 

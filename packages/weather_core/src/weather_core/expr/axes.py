@@ -32,6 +32,7 @@ ROUTE = "route"
 
 class ExprError(ValueError):
     """The client's query is invalid (syntax, names, types, selections) or exceeds a limit."""
+    span: tuple[int, int, int, int] | None = None  # (lineno, col_offset, end_lineno, end_col_offset) it points to
 
 
 @dataclass(frozen=True)

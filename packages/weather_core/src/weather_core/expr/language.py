@@ -155,7 +155,10 @@ def _check_size(tree: ast.AST) -> None:
 
 def _error(node: ast.AST, message: str) -> ExprError:
     line = getattr(node, "lineno", None)
-    return ExprError(f"line {line}, column {node.col_offset + 1}: {message}" if line else message)
+    error = ExprError(f"line {line}, column {node.col_offset + 1}: {message}" if line else message)
+    if line:
+        error.span = (line, node.col_offset, node.end_lineno, node.end_col_offset)
+    return error
 
 
 # -- literals --------------------------------------------------------------------------------------------------------

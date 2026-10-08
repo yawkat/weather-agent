@@ -3,7 +3,8 @@
 `Redacted(text)` keeps a query's shape (methods, variables, reductions, thresholds, times, models) and hides what
 locates it: coordinates, place names, polylines, and names the client chose (bindings, dict keys, places(Name=…)).
 Strings are kept only if they are known vocabulary or ISO times; numbers are hidden where they may be coordinates.
-`scrub` applies the same to messages (errors, warnings) that may quote the query's locations.
+Messages (errors, warnings) may quote the query's locations, so the log never shows them: `at(span)` gives the
+redacted node an ExprError points to instead.
 """
 
 import ast
@@ -12,18 +13,19 @@ from datetime import datetime
 
 from ..variables import CATALOG
 from .axes import DIMS
-from .language import COORDINATES, MAX_CHARS, RESAMPLE, SPECIAL, _check_size
+from .language import COORDINATES, MAX_CHARS, NUMPY, REDUCTIONS, RESAMPLE, SPECIAL, _check_size
 
 VOCABULARY = {*CATALOG, *DIMS, *RESAMPLE, *COORDINATES, "time.hour", "distance_km"}
 LOCATING = ("places", "distance_from")  # route(…) keeps speed and start; its polyline is an unknown string
 COORDINATE_NAMES = ("lat", "lon")
 # Names that aren't the client's: built-ins the language knows, or rejects with a hint.
+# Attributes and keyword arguments the language knows; others may be the client's words (`fc.koeln`).
+METHODS = {"interp", "sel", "isel", "where", "clip", "round", "rolling", "resample", "groupby", "groupby_bins",
+           "idxmax", "idxmin", "sortby", "quantile", "dt", "hour", "dayofweek"}
+KEYWORDS = {"ascending", "bins", "by", "cond", "decimals", "dim", "gpx", "max", "min", "n", "other", "polyline", "q",
+            "speed_kmh", "start", "use_gpx_times"}
 BUILTINS = {*SPECIAL, "slice", "range", "max", "min", "sum", "len", "round", "any", "all", "True", "False", "None"}
 HIDDEN = ...  # numbers are shown as `...`
-
-_DECIMAL = re.compile(r"-?\d+\.\d+")
-# Not after a letter: the apostrophe of "isn't" opens no quote.
-_QUOTED = re.compile(r"(?<!\w)'[^']*'|(?<!\w)\"[^\"]*\"")
 
 
 def _is_time(text: str) -> bool:
@@ -71,11 +73,10 @@ class _Redactor(ast.NodeTransformer):
     def __init__(self, keep: set[str]):
         self.keep = keep
         self.aliases: dict[tuple[str, str], str] = {}  # (kind, original) → placeholder
-        self.hidden: set[str] = set()  # original strings, to scrub from messages
         self.locating = 0  # depth of subtrees whose numbers are hidden
+        self.labelling = 0  # inside places(…)/distance_from(…): every string and keyword is the client's
 
     def alias(self, kind: str, original: str) -> str:
-        self.hidden.add(original)
         key = (kind, original)
         if key not in self.aliases:
             self.aliases[key] = f"{kind}{sum(k == kind for k, _ in self.aliases) + 1}"
@@ -102,11 +103,23 @@ class _Redactor(ast.NodeTransformer):
         locating = isinstance(func, ast.Name) and func.id in LOCATING
         if locating:
             for k in node.keywords:  # places(Köln=(50.9, 6.9))
-                if k.arg is not None and k.arg not in self.keep:
+                if k.arg is not None:
                     k.arg = self.alias("p", k.arg)
-        return self.hiding(node, locating)
+        self.labelling += locating
+        try:
+            return self.hiding(node, locating)
+        finally:
+            self.labelling -= locating
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+        if node.attr not in self.keep and node.attr not in NUMPY and node.attr not in REDUCTIONS \
+                and node.attr not in METHODS:
+            node.attr = self.alias("a", node.attr)
+        return self.generic_visit(node)
 
     def visit_keyword(self, node: ast.keyword) -> ast.AST:
+        if node.arg is not None and not self.labelling and node.arg not in self.keep and node.arg not in KEYWORDS:
+            node.arg = self.alias("k", node.arg)
         return self.hiding(node, node.arg in COORDINATE_NAMES)
 
     def visit_Compare(self, node: ast.Compare) -> ast.AST:
@@ -124,10 +137,8 @@ class _Redactor(ast.NodeTransformer):
     def visit_Constant(self, node: ast.Constant) -> ast.AST:
         value = node.value
         if isinstance(value, str):
-            if value in self.keep or _is_time(value):
+            if not self.labelling and (value in self.keep or _is_time(value)):
                 return node
-            for part in value.split(";"):  # places('Köln@50.9,6.9; Bonn@…')
-                self.hidden.add(part.strip().rpartition("@")[0].strip())
             return ast.copy_location(ast.Constant(self.alias("s", value)), node)
         if type(value) in (int, float, complex) and self.locating:
             return ast.copy_location(ast.Constant(HIDDEN), node)
@@ -138,27 +149,28 @@ class Redacted:
     def __init__(self, text: str, keep=()):
         """`keep`: further strings that locate nothing, e.g. model names."""
         self.keep = VOCABULARY | set(keep)
-        self.hidden: list[str] = []
+        self.tree: ast.Module | None = None
         try:
             if len(text) > MAX_CHARS:
                 raise ValueError
-            tree = ast.parse(text.strip(), mode="exec")
+            tree = ast.parse(text.strip(), mode="exec")  # as parse() does, so ExprError spans match
             _check_size(tree)  # bounds the walks below, as for the query itself
-            redactor = _Redactor(self.keep)
-            tree = redactor.visit(tree)
-            self.text = ast.unparse(tree).replace("\n", "; ")
-            # Longest first, so a name isn't half-replaced by a shorter one inside it.
-            self.hidden = sorted((h for h in redactor.hidden if len(h) >= 2), key=len, reverse=True)
+            self.tree = _Redactor(self.keep).visit(tree)  # replaced nodes keep their spans
+            self.text = ast.unparse(self.tree).replace("\n", "; ")
         except BaseException as e:  # SyntaxError, ExprError (too large), or anything unexpected: log no query
             if isinstance(e, (KeyboardInterrupt, SystemExit, GeneratorExit)):
                 raise
+            self.tree = None
             self.text = f"<unparseable or too large, {len(text)} characters>"
 
     def __str__(self) -> str:
         return self.text
 
-    def scrub(self, message: str) -> str:
-        for h in self.hidden:
-            message = re.sub(rf"(?<!\w){re.escape(h)}(?!\w)", "…", message)
-        message = _QUOTED.sub(lambda m: m[0] if m[0][1:-1] in self.keep or _is_time(m[0][1:-1]) else "'…'", message)
-        return _DECIMAL.sub("…", message)
+    def at(self, span: tuple[int, int, int, int] | None) -> str | None:
+        """The redacted node at a span (lineno, col_offset, end_lineno, end_col_offset) of the query, if any."""
+        if self.tree is None or span is None:
+            return None
+        for node in ast.walk(self.tree):
+            if span == tuple(getattr(node, a, None) for a in ("lineno", "col_offset", "end_lineno", "end_col_offset")):
+                return ast.unparse(node).replace("\n", "; ")
+        return None

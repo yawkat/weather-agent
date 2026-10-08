@@ -1,5 +1,11 @@
 """Queries in the server log keep their shape but not their locations."""
 
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from weather_core.expr.axes import ExprError
+from weather_core.expr.language import Env, compile_query, parse
 from weather_core.expr.redact import Redacted
 
 
@@ -35,17 +41,33 @@ def test_areas_and_coordinate_comparisons():
     assert "t2m > 25" in r.text
 
 
-def test_scrub_messages():
-    r = Redacted("forecast().interp(places(Köln=(50.94, 6.96))).sel(point='Bonn').t2m")
-    assert r.scrub("no data for places Köln, Bonn") == "no data for places …, …"
-    assert r.scrub("the point (50.94, 6.96) is outside") == "the point (…, …) is outside"
-    assert r.scrub("unknown variable 'Kölnx'; variables: t2m") == "unknown variable '…'; variables: t2m"
+def _error(query: str) -> ExprError:
+    env = Env(("ifs-ens",), {"ifs-ens": {"t2m", "precip"}}, ZoneInfo("Europe/Berlin"))
+    with pytest.raises(ExprError) as e:
+        compile_query(parse(query), env)
+    return e.value
+
+
+def test_error_location_is_redacted():
+    query = "fc = forecast().interp(places(Köln=(50.94, 6.96)))\nfc.koeln.sel(point='Köln').max('time')"
+    r = Redacted(query, keep=["ifs-ens"])
+    assert r.at(_error(query).span) == "v1.a1"
+    assert "koeln" not in r.text and "Köln" not in r.text
+
+
+def test_error_without_span():
+    r = Redacted("forecast().t2m")
+    assert r.at(None) is None and Redacted("(").at((1, 0, 1, 1)) is None
+
+
+def test_unknown_keywords_are_aliased():
+    r = Redacted("forecast().interp(lat=50.94, lon=6.96).t2m.rolling(time=3, koeln=1).mean('member')")
+    assert "rolling(time=3, k1=1)" in r.text
 
 
 def test_unparseable():
     r = Redacted("forecast().interp(lat=50.94, lon=6.96")
     assert str(r) == "<unparseable or too large, 37 characters>"
-    assert r.scrub("line 1: (50.94, 6.96)") == "line 1: (…, …)"
 
 
 def test_too_large_is_not_walked():
@@ -53,8 +75,12 @@ def test_too_large_is_not_walked():
     assert str(Redacted(query)) == f"<unparseable or too large, {len(query)} characters>"
 
 
-def test_vocabulary_bindings_and_contractions():
+def test_vocabulary_bindings():
     r = Redacted("precip = forecast().interp(lat=50.94, lon=6.96).precip\nprecip.sel(point='Bonn').sum('time')")
     assert r.text.startswith("precip = ")
-    assert r.scrub("no model provides precip") == "no model provides precip"
-    assert r.scrub("Python's max() doesn't work; 'Bonn' isn't 'x'") == "Python's max() doesn't work; '…' isn't '…'"
+
+
+def test_place_labels_that_look_like_vocabulary():
+    r = Redacted("forecast().interp(places(time=(50.9, 6.9), **{'ifs-ens': (51.0, 7.0)})).t2m", keep=["ifs-ens"])
+    assert "time" not in r.text and "ifs-ens" not in r.text
+

@@ -20,10 +20,11 @@ log = logging.getLogger(__name__)
 # Annotation arguments must be literals: Pyronaut reads them from source without evaluating.
 
 
-def _run(fn: Callable[[], dict], call: str, scrub: Callable[[str], str] = lambda m: m,
+def _run(fn: Callable[[], dict], call: str, redacted: Redacted | None = None,
          summarize: Callable[[dict], str] = lambda r: "") -> str:
-    """Run a tool and log the call. `call` and what `scrub`/`summarize` let through must not locate anyone:
-    the log shows what agents ask, not where."""
+    """Run a tool and log the call. `call` and `summarize` must not locate anyone: the log shows what agents ask,
+    not where. Error messages may quote locations, so only their type and the (redacted) node they point to are
+    logged."""
     started = time.monotonic()
     outcome = "failed"
     try:
@@ -31,7 +32,8 @@ def _run(fn: Callable[[], dict], call: str, scrub: Callable[[str], str] = lambda
         outcome = f"ok{summarize(result)}"
         return json.dumps(result, ensure_ascii=False)
     except (SourceError, ValueError) as e:  # includes QueryError/ExprError: bad queries, timeouts, limits
-        outcome = f"rejected ({type(e).__name__}: {scrub(str(e))})"
+        node = redacted.at(getattr(e, "span", None)) if redacted is not None else None
+        outcome = f"rejected ({type(e).__name__}{f' at {node}' if node else ''})"
         return json.dumps({"error": str(e)}, ensure_ascii=False)
     except BaseException as e:  # Java exceptions surface here as foreign exceptions, not Python Exceptions
         if isinstance(e, (KeyboardInterrupt, SystemExit, GeneratorExit)):
@@ -45,16 +47,14 @@ def _run(fn: Callable[[], dict], call: str, scrub: Callable[[str], str] = lambda
         log.info("%s: %s in %.1f s", call, outcome, time.monotonic() - started)
 
 
-def _forecast_summary(scrub: Callable[[str], str]) -> Callable[[dict], str]:
-    def summarize(result: dict) -> str:
-        models = ", ".join(m.get("model", "?") for m in result.get("models", []))
-        out = f", models [{models}], {result.get('downloaded_mb', 0)} MB downloaded"
-        if result.get("unavailable_sources"):
-            out += f", unavailable {[s['source'] for s in result['unavailable_sources']]}"
-        if result.get("warnings"):
-            out += f", warnings {[scrub(w) for w in result['warnings']]}"
-        return out
-    return summarize
+def _forecast_summary(result: dict) -> str:
+    models = ", ".join(m.get("model", "?") for m in result.get("models", []))
+    out = f", models [{models}], {result.get('downloaded_mb', 0)} MB downloaded"
+    if result.get("unavailable_sources"):
+        out += f", unavailable {[s['source'] for s in result['unavailable_sources']]}"
+    if result.get("warnings"):
+        out += f", {len(result['warnings'])} warning(s)"  # their text may quote locations
+    return out
 
 
 @Singleton
@@ -81,8 +81,7 @@ class ForecastTools:
                  gpx: Annotated[str | None, ToolArg(description="Optional GPX document; the query refers to it as route(gpx, start=…, …)")] = None) -> str:
         redacted = Redacted(query, keep=(s.name for s in self.forecaster.sources))
         call = f"forecast {redacted}" + (f" (gpx: {len(gpx)} characters)" if gpx is not None else "")
-        return _run(lambda: self.forecaster.forecast(query, gpx=gpx), call, redacted.scrub,
-                    _forecast_summary(redacted.scrub))
+        return _run(lambda: self.forecaster.forecast(query, gpx=gpx), call, redacted, _forecast_summary)
 
     @Tool(description="Summarise a route from GPX text or a polyline: length, bounding box, duration at a speed, "
                       "and a compact encoded polyline to use in forecast queries (route(polyline=…)) instead of the full GPX.")
@@ -93,8 +92,7 @@ class ForecastTools:
         given = [f"{name}: {len(value)} characters" for name, value in (("polyline", polyline), ("gpx", gpx))
                  if value is not None]
         call = f"describe_route ({', '.join(given) or 'no route'}, speed {speed_kmh} km/h)"
-        return _run(lambda: self.forecaster.describe_route(polyline=polyline, gpx=gpx, speed_kmh=speed_kmh), call,
-                    lambda m: "…")
+        return _run(lambda: self.forecaster.describe_route(polyline=polyline, gpx=gpx, speed_kmh=speed_kmh), call)
 
 
 @Singleton
@@ -112,5 +110,4 @@ class PlaceTools:
                       query: Annotated[str, ToolArg(description="Place name(s), e.g. 'Cologne, Germany; Bonn, Germany'")]) -> str:
         names = [n for n in query.split(";") if n.strip()]
         return _run(lambda: self.geocoder.resolve_many(query), f"resolve_place ({len(names)} name(s))",
-                    lambda m: "…",
-                    lambda r: f", {sum('error' in p for p in r['results'])} not found")
+                    summarize=lambda r: f", {sum('error' in p for p in r['results'])} not found")
