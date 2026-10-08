@@ -32,10 +32,15 @@ class Download:
 
 
 class Decoder(Protocol):
-    def decode(self, path: str) -> list[np.ndarray]:
-        """Values of every GRIB message in the file, in file order, flattened, float32 (NaN = missing)."""
+    def decode(self, path: str, extract: Callable[[np.ndarray], np.ndarray] | None = None) -> list[np.ndarray]:
+        """Values of every GRIB message in the file, in file order, flattened, float32 (NaN = missing).
 
-    def decode_files(self, paths: list[str]) -> list[np.ndarray]:
+        `extract` (e.g. a crop) is applied to each field as it is read, so only one full field is in memory at a
+        time: a step of a global ensemble is over a gigabyte.
+        """
+
+    def decode_files(self, paths: list[str],
+                     extract: Callable[[np.ndarray], np.ndarray] | None = None) -> list[np.ndarray]:
         """Like `decode`, for several files at once (decoded in parallel, if the implementation can)."""
 
 

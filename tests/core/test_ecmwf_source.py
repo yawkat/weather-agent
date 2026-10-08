@@ -67,13 +67,13 @@ class FakeServer:
 
 
 class FakeDecoder:
-    def decode(self, path):
+    def decode(self, path, extract=None):
         data = open(path, "rb").read()
         out = []
         for i in range(0, len(data), 16):
             p, m, step, _ = data[i:i + 16].decode().split("|")
             out.append(field(p.strip(), int(step), int(m)))
-        return out
+        return out if extract is None else [extract(f) for f in out]
 
 
 def hourly(start, length):

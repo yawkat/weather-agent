@@ -85,15 +85,15 @@ class FakeDwdServer:
 
 
 class FakeDwdDecoder:
-    def decode(self, path):
-        return self.decode_files([path])
+    def decode(self, path, extract=None):
+        return self.decode_files([path], extract)
 
-    def decode_files(self, paths):
+    def decode_files(self, paths, extract=None):
         out = []
         for path in paths:
             param, member, step = open(path, "rb").read().decode().split("|")
             out.append(field(param, int(member), int(step)))
-        return out
+        return out if extract is None else [extract(f) for f in out]
 
 
 def make(tmp_path, model=ICON_D2_EPS, published=None, now=RUN + timedelta(hours=2), member_one_behind=None,
