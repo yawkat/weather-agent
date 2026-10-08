@@ -36,22 +36,30 @@ class DownloadBudget:
         self._lock = threading.Lock()
         self._recent: deque[Reservation] = deque()
         self._query: ContextVar[list[int] | None] = ContextVar("download_query", default=None)
-        self._keep_free: ContextVar[int] = ContextVar("download_keep_free", default=0)
+        self._background: ContextVar[bool] = ContextVar("download_background", default=False)
 
     @contextmanager
-    def query(self, keep_free_bytes: int = 0) -> Iterator[None]:
-        """Scope of one query: its reservations share the per-query limit. `keep_free_bytes` of the hourly limit
-        stay unused by it (background work leaves room for interactive queries)."""
+    def query(self) -> Iterator[None]:
+        """Scope of one query: its reservations share the per-query limit."""
         token = self._query.set([0])
-        keep_free = self._keep_free.set(keep_free_bytes)
         try:
             yield
         finally:
-            self._keep_free.reset(keep_free)
             self._query.reset(token)
+
+    @contextmanager
+    def background(self) -> Iterator[None]:
+        """Scope of work clients don't drive (prefetch): its downloads are neither limited nor counted."""
+        token = self._background.set(True)
+        try:
+            yield
+        finally:
+            self._background.reset(token)
 
     def reserve(self, nbytes: int) -> Reservation:
         """Account for a download before it starts; raises BudgetExceeded if it would exceed a limit."""
+        if self._background.get():
+            return Reservation(self.clock(), nbytes, None)
         used_by_query = self._query.get()
         before = used_by_query[0] if used_by_query is not None else 0
         if before + nbytes > self.per_request_bytes:
@@ -62,7 +70,7 @@ class DownloadBudget:
         with self._lock:
             now = self._prune()
             used = sum(r.nbytes for r in self._recent)
-            if used + nbytes > self.per_hour_bytes - self._keep_free.get():
+            if used + nbytes > self.per_hour_bytes:
                 raise BudgetExceeded(f"hourly download limit reached ({used / 1e6:.0f} of "
                                   f"{self.per_hour_bytes / 1e6:.0f} MB used); cached data is still served")
             reservation = Reservation(now, nbytes, used_by_query)

@@ -40,9 +40,18 @@ def test_ecmwf_mirrors_are_configured(my_context):
 
     sources = [s for s in my_context.getBean(ForecastService).forecaster.sources if s.name.startswith("ecmwf")]
     assert len(sources) == 2 and sources[0].hosts is sources[1].hosts
-    assert sources[0].hosts.bases == ["https://data.ecmwf.int/forecasts",
-                                      "https://storage.googleapis.com/ecmwf-open-data",
+    assert sources[0].hosts.bases == ["https://storage.googleapis.com/ecmwf-open-data",
+                                      "https://data.ecmwf.int/forecasts",
                                       "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com"]
+
+
+def test_prefetch_keeps_the_ensembles_warm_but_not_in_tests(my_context):
+    from weather_agent.config import PrefetchConfig
+    from weather_agent.forecast_service import ForecastService
+
+    assert not my_context.getBean(PrefetchConfig).enabled  # application-test.toml: no downloads from tests
+    prefetcher = my_context.getBean(ForecastService).prefetcher
+    assert prefetcher.sources == [] and "td2m" in prefetcher.variables
 
 def test_fetcher_reports_error_status(my_context):
     """A non-200, non-404 answer (here GET /mcp on our own server) is an UpstreamError naming the status."""
@@ -140,22 +149,6 @@ def test_bad_access_key_stops_startup():
         ApplicationContext.builder().environments("test").properties(properties).start().close()
 
 
-def _start(**settings):
-    import java
-
-    ApplicationContext = java.type("io.micronaut.context.ApplicationContext")
-    properties = java.type("java.util.HashMap")()
-    for key, value in settings.items():
-        properties.put(key, value)
-    ApplicationContext.builder().environments("test").properties(properties).start().close()
-
-
-def test_prefetch_without_budget_stops_startup():
-    with pytest.raises(BaseException, match="keep-free-mb .* must be below"):
-        _start(**{"weather.download.max-mb-per-hour": "8000"})
-    _start(**{"weather.download.max-mb-per-hour": "8000", "weather.prefetch.enabled": "false"})
-
-
 def test_settings_from_environment(tmp_path):
     """Deployments set `weather.*` through environment variables; lists come as comma-separated values."""
     import java
@@ -169,7 +162,8 @@ def test_settings_from_environment(tmp_path):
     env.put("WEATHER_ALLOWED_HOSTS", "localhost,weather.test")
     env.put("WEATHER_CACHE_DIR", str(tmp_path))
     env.put("WEATHER_ECMWF_MIRRORS", "https://mirror.test, https://other.test,")
-    env.put("WEATHER_PREFETCH_FULL_MODELS", "icon-d2-eps")
+    env.put("WEATHER_PREFETCH_ENABLED", "true")
+    env.put("WEATHER_PREFETCH_MODELS", "icon-d2-eps, icon-eu-eps")
     env.put("WEATHER_GEOCODER_TIMEOUT_SECONDS", "2.5")
     source = PropertySource.of("test-env", env, PropertySource.PropertyConvention.ENVIRONMENT_VARIABLE,
                                PropertySource.Origin.of("test env"))
@@ -180,10 +174,10 @@ def test_settings_from_environment(tmp_path):
         assert context.getBean(WeatherConfig).cache_dir == str(tmp_path)
         assert len(context.getBean(EcmwfConfig).mirrors) == 3  # split as is; ForecastService cleans up
         ecmwf = next(s for s in context.getBean(ForecastService).forecaster.sources if s.name.startswith("ecmwf"))
-        assert ecmwf.hosts.bases == ["https://data.ecmwf.int/forecasts", "https://mirror.test", "https://other.test"]
-        assert list(context.getBean(PrefetchConfig).full_models) == ["icon-d2-eps"]
-        assert list(context.getBean(PrefetchConfig).models) == ["ecmwf-ens", "ecmwf-aifs-ens", "icon-d2-eps",
-                                                                "icon-eu-eps"]
+        assert ecmwf.hosts.bases == ["https://storage.googleapis.com/ecmwf-open-data", "https://mirror.test",
+                                     "https://other.test"]
+        prefetcher = context.getBean(ForecastService).prefetcher
+        assert [s.name for s in prefetcher.sources] == ["icon-d2-eps", "icon-eu-eps"]
         assert context.getBean(GeocoderConfig).timeout_seconds == 2.5
     finally:
         context.close()

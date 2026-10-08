@@ -21,7 +21,6 @@ from .expr.axes import BOOL, LABEL, LAT, LON, POINT, RECORD, ExprError, Type
 from .expr.language import Demand, Env, Location, Sizes, compile_query, parse
 from .geometry import LatLon, area_grid, decode_polyline, encode_polyline, parse_gpx, sample_route, simplify
 from .grid import OutsideRegion
-from .prefetch import WarmSet
 from .sources.base import Prepared, Query, SourceError
 from .timeaxis import OutsideForecast
 
@@ -89,9 +88,8 @@ class Forecaster:
     def __init__(self, sources: Sequence[Source], default_tz: str = "Europe/Berlin",
                  clock=lambda: datetime.now(timezone.utc), budget: DownloadBudget | None = None,
                  max_concurrent: int = 4, busy_timeout_s: float = 30.0, eval_bytes: int = 1 << 30,
-                 eval_timeout_s: float = 15.0, max_rows: int = 500, warm: WarmSet | None = None):
+                 eval_timeout_s: float = 15.0, max_rows: int = 500):
         self.sources = list(sources)
-        self.warm = warm  # answered queries go here, to be kept warm (weather_core.prefetch)
         self.budget = budget  # the one the sources reserve from; a query's sources share its per-query limit
         self.default_tz = ZoneInfo(default_tz)
         self.clock = clock
@@ -163,8 +161,6 @@ class Forecaster:
                     p = _attempt(source, problems, lambda: source.prepare(r.query, r.variables))
                     if p is not None:
                         fetched.setdefault(loc, []).append((source, p))
-                        if self.warm is not None:
-                            self.warm.record(source.name, r.query, r.variables)
 
         warnings = list(compiled.warnings)
         table: dict[tuple, dict] = {}

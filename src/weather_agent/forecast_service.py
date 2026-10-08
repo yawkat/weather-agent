@@ -1,10 +1,10 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from jakarta.inject import Singleton
 from weather_core.budget import DownloadBudget
 from weather_core.forecast import Forecaster
-from weather_core.prefetch import Prefetcher, WarmSet
+from weather_core.prefetch import VARIABLES, Prefetcher
 from weather_core.sources.dwd import ICON_D2_EPS, ICON_D2_RUC_EPS, ICON_EU_EPS, DwdIconSource
 from weather_core.sources.ecmwf import AIFS_ENS, IFS_ENS, EcmwfSource
 from weather_core.sources.mirrors import Mirrors
@@ -40,11 +40,8 @@ class ForecastService:
               for model in (ICON_D2_RUC_EPS, ICON_D2_EPS, ICON_EU_EPS)),
         ]
 
-        warm = WarmSet(names(prefetch.models), max_entries=prefetch.max_entries,
-                       ttl=timedelta(hours=prefetch.ttl_hours))
         self.forecaster = Forecaster(sources, default_tz=config.timezone, budget=budget,
                                      max_concurrent=query.max_concurrent, eval_bytes=query.memory_mb * 2**20,
-                                     eval_timeout_s=query.timeout_ms / 1000, max_rows=query.max_rows, warm=warm)
-        self.prefetcher = Prefetcher(sources, warm, budget, keep_free_bytes=prefetch.keep_free_mb * 1_000_000,
-                                     full_models=names(prefetch.full_models),
-                                     full_variables=names(prefetch.full_variables))
+                                     eval_timeout_s=query.timeout_ms / 1000, max_rows=query.max_rows)
+        self.prefetcher = Prefetcher(sources, names(prefetch.models) if prefetch.enabled else [],
+                                     names(prefetch.variables) or VARIABLES, budget=budget)

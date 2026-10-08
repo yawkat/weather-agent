@@ -22,26 +22,22 @@ path = '/etc/ssl/certs/ca-certificates.crt'
 format = 'PEM'
 
 [weather.ecmwf]
-# Open data comes from data.ecmwf.int (`base-url`) and, while that fails (e.g. HTTP 429), from these copies with the
-# same layout and bytes, in order (weather_core.sources.mirrors). Google Cloud's held up when the others throttled;
-# AWS's S3 bucket often answers 503 SlowDown while everyone fetches a new run. They copy new runs minutes late.
+# Open data comes from Google Cloud's copy (`base-url`, set in config.py) and, while that fails, from these hosts with
+# the same layout and bytes, in order (weather_core.sources.mirrors). ECMWF's own server throttles (HTTP 429) while
+# everyone fetches a new run; AWS's S3 bucket often answers 503 SlowDown then.
 mirrors = [
-    'https://storage.googleapis.com/ecmwf-open-data',
+    'https://data.ecmwf.int/forecasts',
     'https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com',
 ]
 
 [weather.prefetch]
-# Every `interval`, fetch from each model's newest run what queries answered in the last `ttl-hours` needed (at most
-# `max-entries` model/place/time windows, in memory only), so repeat questions don't wait for downloads
-# (weather_core.prefetch). Passes leave `keep-free-mb` of the hourly download budget to interactive queries.
-# RUC-EPS isn't in `models`: a new run every hour, for questions about the next few hours.
+# Every `interval`, fetch every step of each model's newest run for `variables` that isn't cached yet, so queries
+# don't wait for downloads (weather_core.prefetch). About 220 GB of downloads a day and 90 GB of cache with these
+# models; prefetch doesn't count against the download limits. RUC-EPS isn't kept warm: a new run every hour, for
+# questions about the next few hours. For local runs, set WEATHER_PREFETCH_ENABLED=false.
 interval = '10m'
 models = ['ecmwf-ens', 'ecmwf-aifs-ens', 'icon-d2-eps', 'icon-eu-eps']
-# Models to keep fully warm: every step of the newest run for `full-variables`, e.g. the ones below
-# (~85 GB of downloads a day, ~70 GB of cache). That needs more hourly budget than the default leaves prefetch:
-# raise weather.download.max-mb-per-hour (e.g. to 40000).
-# full-models = ['icon-d2-eps', 'icon-eu-eps']
-full-variables = ['precip', 't2m', 'td2m', 'wind', 'gust', 'cloud']
+variables = ['precip', 't2m', 'td2m', 'wind', 'gust', 'cloud']
 
 # One client per upstream (http_fetcher.Fetchers). Request URLs are absolute, so `url` is only a default.
 [micronaut.http.services.ecmwf]
