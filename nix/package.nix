@@ -31,7 +31,7 @@ stdenv.mkDerivation {
     runHook preInstall
     makeWrapper ${graalvm-ce}/bin/java $out/bin/weather-agent \
       --set VIRTUAL_ENV ${venv} \
-      --set-default WEATHER_CA_BUNDLE ${caBundle} \
+      --set-default MICRONAUT_CERTIFICATE_FILE_SYSTEM_PATH ${caBundle} \
       --add-flags "-Djna.library.path=${lib.makeLibraryPath [ libaec ]} \$JAVA_OPTS -jar ${jar}"
     runHook postInstall
   '';

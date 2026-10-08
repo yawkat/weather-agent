@@ -27,7 +27,7 @@ pkgs.testers.runNixOSTest {
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       environment = {
-        WEATHER_BIND_HOST = "127.0.0.1";
+        MICRONAUT_SERVER_HOST = "127.0.0.1";
         MICRONAUT_SERVER_PORT = "8080";
         WEATHER_ALLOWED_HOSTS = "localhost,weather.test";
         WEATHER_CACHE_DIR = "/var/lib/weather-agent/cache";

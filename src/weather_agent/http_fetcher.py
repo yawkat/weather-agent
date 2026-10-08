@@ -19,11 +19,12 @@ from java.nio import ByteBuffer
 from java.nio.channels import FileChannel
 from java.nio.file import Path, StandardOpenOption
 from java.util.concurrent import TimeUnit
-from micronaut.context.annotation import Value
 from micronaut.http import HttpRequest
 from micronaut.http.client import HttpClient
 from micronaut.http.client.annotation import Client
 from weather_core.sources.base import Download, NotPublished, SourceError
+
+from .config import WeatherConfig
 
 log = logging.getLogger(__name__)
 
@@ -44,11 +45,10 @@ class Fetchers:
                  ecmwf: Annotated[HttpClient, Client("ecmwf")],
                  dwd: Annotated[HttpClient, Client("dwd")],
                  nominatim: Annotated[HttpClient, Client("nominatim")],
-                 user_agent: Annotated[str, Value("${weather.user-agent:weather-agent/0.1 (personal use)}")],
-                 max_connections: Annotated[int, Value("${weather.max-connections:8}")]):
-        self.ecmwf = MicronautFetcher(ecmwf, user_agent, max_connections)
-        self.dwd = MicronautFetcher(dwd, user_agent, max_connections)
-        self.nominatim = MicronautFetcher(nominatim, user_agent, 1)  # one request at a time anyway
+                 config: WeatherConfig):
+        self.ecmwf = MicronautFetcher(ecmwf, config.user_agent, config.max_connections)
+        self.dwd = MicronautFetcher(dwd, config.user_agent, config.max_connections)
+        self.nominatim = MicronautFetcher(nominatim, config.user_agent, 1)  # one request at a time anyway
 
 
 class MicronautFetcher:

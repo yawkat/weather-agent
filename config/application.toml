@@ -5,47 +5,43 @@
 name = 'weather-agent'
 
 [micronaut.server]
-# Local only by default; deployments set WEATHER_BIND_HOST to the VPN/LAN address (or keep loopback behind a proxy).
-host = '${WEATHER_BIND_HOST:127.0.0.1}'
+# Local only by default; deployments set MICRONAUT_SERVER_HOST to the VPN/LAN address (or keep loopback behind a
+# proxy).
+host = '127.0.0.1'
 # Tool arguments are small; GPX is capped at 5 MB of text in weather_core anyway.
 max-request-size = 6291456  # 6 MiB
 
-[weather]
-# Host names (and Origin hosts) /mcp accepts; protects against DNS rebinding from browsers (McpHostFilter).
-allowed-hosts = '${WEATHER_ALLOWED_HOSTS:`localhost,127.0.0.1,::1`}'
-# Secret path: with a key set, MCP is only at /mcp/<key> (McpKeyFilter). Deployments use the file (e.g. a systemd
-# credential); the key must be 32+ characters of base64url.
-access-key = '${WEATHER_ACCESS_KEY:}'
-access-key-file = '${WEATHER_ACCESS_KEY_FILE:}'
-
-[weather.geocoder]
-# Public Nominatim: ≤1 request/s, identifying User-Agent, results cached in memory. Point this at a
-# self-hosted Nominatim if usage grows.
-url = '${WEATHER_GEOCODER_URL:`https://nominatim.openstreetmap.org`}'
+# Settings under `weather` are documented in weather_agent/config.py and McpAccessConfig.java. Deployments set
+# them through the environment, e.g. WEATHER_ALLOWED_HOSTS, WEATHER_ACCESS_KEY_FILE.
 
 # Upstream downloads (ECMWF, DWD). The JDK's CA list lacks some roots the system (Mozilla) bundle has, e.g.
-# HARICA, which signs data.ecmwf.int, so the client trusts the system PEM bundle.
-[micronaut.certificate.file.system-ca]
-path = '${WEATHER_CA_BUNDLE:`/etc/ssl/certs/ca-certificates.crt`}'
+# HARICA, which signs data.ecmwf.int, so the client trusts the system PEM bundle (the package points
+# MICRONAUT_CERTIFICATE_FILE_SYSTEM_PATH at its own).
+[micronaut.certificate.file.system]
+path = '/etc/ssl/certs/ca-certificates.crt'
 format = 'PEM'
 
 [weather.ecmwf]
 # Open data comes from data.ecmwf.int (`base-url`) and, while that fails (e.g. HTTP 429), from these copies with the
 # same layout and bytes, in order (weather_core.sources.mirrors). Google Cloud's held up when the others throttled;
 # AWS's S3 bucket often answers 503 SlowDown while everyone fetches a new run. They copy new runs minutes late.
-mirrors = '${WEATHER_ECMWF_MIRRORS:`https://storage.googleapis.com/ecmwf-open-data,https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com`}'
+mirrors = [
+    'https://storage.googleapis.com/ecmwf-open-data',
+    'https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com',
+]
 
 [weather.prefetch]
 # Every `interval`, fetch from each model's newest run what queries answered in the last `ttl-hours` needed (at most
 # `max-entries` model/place/time windows, in memory only), so repeat questions don't wait for downloads
 # (weather_core.prefetch). Passes leave `keep-free-mb` of the hourly download budget to interactive queries.
 # RUC-EPS isn't in `models`: a new run every hour, for questions about the next few hours.
-enabled = '${WEATHER_PREFETCH:true}'
 interval = '10m'
-# Models to keep fully warm: every step of the newest run for `full-variables`, e.g. 'icon-d2-eps,icon-eu-eps'
+models = ['ecmwf-ens', 'ecmwf-aifs-ens', 'icon-d2-eps', 'icon-eu-eps']
+# Models to keep fully warm: every step of the newest run for `full-variables`, e.g. the ones below
 # (~85 GB of downloads a day, ~70 GB of cache). That needs more hourly budget than the default leaves prefetch:
 # raise weather.download.max-mb-per-hour (e.g. to 40000).
-full-models = '${WEATHER_PREFETCH_FULL_MODELS:}'
+# full-models = ['icon-d2-eps', 'icon-eu-eps']
+full-variables = ['precip', 't2m', 'td2m', 'wind', 'gust', 'cloud']
 
 # One client per upstream (http_fetcher.Fetchers). Request URLs are absolute, so `url` is only a default.
 [micronaut.http.services.ecmwf]
@@ -53,7 +49,7 @@ url = 'https://data.ecmwf.int'
 read-timeout = '5m'
 max-content-length = 104857600  # 100 MiB; range responses are ~1 MB
 follow-redirects = true
-ssl.trust-name = 'system-ca'
+ssl.trust-name = 'system'
 # The Google Cloud mirror negotiates HTTP/2, which is slow with Micronaut's client (see the dwd service below).
 alpn-modes = ['http/1.1']
 pool.max-concurrent-http1-connections = 8
@@ -63,7 +59,7 @@ url = 'https://opendata.dwd.de'
 read-timeout = '5m'
 max-content-length = 104857600  # 100 MiB; per-member GRIB files are ~1 MB
 follow-redirects = true
-ssl.trust-name = 'system-ca'
+ssl.trust-name = 'system'
 # opendata.dwd.de negotiates HTTP/2, and Micronaut's HTTP/2 client advertises no flow-control window: the server
 # may send only 64 KiB per round trip on the one shared connection, ~1.5 MB/s in total. HTTP/1.1 over 8
 # connections gets ~50 MB/s. https://github.com/micronaut-projects/micronaut-core/issues/13798
@@ -75,7 +71,7 @@ url = 'https://nominatim.openstreetmap.org'
 read-timeout = '30s'  # GeocodeService also bounds each wait (weather.geocoder.timeout-seconds)
 max-content-length = 1048576  # 1 MiB; search results are a few kB
 follow-redirects = true
-ssl.trust-name = 'system-ca'
+ssl.trust-name = 'system'
 # Requests are one at a time, but a timed-out attempt may still hold its connection while the retry runs.
 pool.max-concurrent-http1-connections = 2
 
