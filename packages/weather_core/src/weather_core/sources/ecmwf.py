@@ -20,8 +20,8 @@ from ..grid import EUROPE, Crop, Region, RegularGrid
 from ..budget import DownloadBudget
 from ..store import FieldStore
 from ..timeaxis import OutsideForecast
-from .base import (NEEDS, Decoder, Download, Fetcher, Prepared, Query, SourceError, SourceSamples, sampling_for,
-                   step_list, with_previous)
+from .base import (NEEDS, Decoder, Download, Fetcher, Prepared, Query, SourceError, SourceSamples, runs_by_coverage,
+                   sampling_for, step_list, with_previous)
 
 log = logging.getLogger(__name__)
 
@@ -145,13 +145,14 @@ class EcmwfSource:
         candidates = self.candidate_runs()
         for key in [k for k in self._index_cache if k[0] not in candidates]:
             del self._index_cache[key], self._index_cache_time[key]
-        for run in candidates:
-            steps = self.model.steps(run)
+        def sampling(run):
             try:
-                sampling = sampling_for(query, run, steps)
+                return sampling_for(query, run, self.model.steps(run))
             except OutsideForecast:
-                continue
-            last_step = steps[max(with_previous(sampling.needed_steps()))]
+                return None
+        for run, s in runs_by_coverage(candidates, sampling):
+            steps = self.model.steps(run)
+            last_step = steps[max(with_previous(s.needed_steps()))]
             if self._index(run, last_step) is not None:
                 return run
         raise SourceError(f"{self.model.model}: no published run covers this time")

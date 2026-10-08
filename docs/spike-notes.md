@@ -105,7 +105,10 @@
 - **Runtime venv** (`nix/venv.nix`): built from `uv.lock` by unpacking wheels, without running Python. The GraalPy
   wheel index publishes no hashes, so their hashes are pinned in `nix/venv.nix`.
 
-## DuckDB as the query engine (spike, 2026-10-07): works
+## DuckDB as the query engine (spike, 2026-10-07): works; removed 2026-10-08
+
+Replaced by our own query language (`docs/query-language.md`): reloading every query's data into a fresh database,
+SQL's limits for per-member questions, and an engine not built for untrusted input. Notes kept for reference.
 
 `org.duckdb:duckdb_jdbc:1.5.6.0` (MIT), used from Java (`src-java/at/yawk/weatheragent/SqlCube.java`) and called
 from Python. Tests: `tests/test_duckdb_spike.py`.

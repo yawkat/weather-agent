@@ -15,7 +15,6 @@ MAX_POLYLINE_CHARS = 100_000
 MAX_GPX_CHARS = 5_000_000
 MAX_ROUTE_POINTS = 20_000  # decoded input points, before resampling
 MAX_ROUTE_SAMPLES = 2_000  # resampled points; spacing grows for very long routes
-MAX_AREA_RADIUS_KM = 1_000.0
 MAX_AREA_SPAN_DEG = 30.0
 
 
@@ -246,20 +245,7 @@ def crosswind(wind_speed, wind_from_deg, travel_bearing_deg):
 # ---------------------------------------------------------------------------------------------------------------
 # Areas
 
-def area_points(center: LatLon | None = None, radius_km: float | None = None,
-                bbox: tuple[float, float, float, float] | None = None, spacing_km: float = 5.0,
-                max_points: int = 2000) -> list[LatLon]:
-    """Regular sample points covering a circle (center + radius) or a bbox (south, west, north, east)."""
-    if bbox is None:
-        if center is None or radius_km is None:
-            raise ValueError("give center and radius_km, or bbox")
-        if not (math.isfinite(radius_km) and 0 < radius_km <= MAX_AREA_RADIUS_KM):
-            raise ValueError(f"radius_km must be between 0 and {MAX_AREA_RADIUS_KM:.0f}")
-        if not (-85 <= center.lat <= 85 and -180 <= center.lon <= 180):
-            raise ValueError("area centre must be within ±85° latitude and ±180° longitude")
-        dlat = radius_km / 111.2
-        dlon = radius_km / (111.2 * math.cos(math.radians(center.lat)))
-        bbox = (center.lat - dlat, center.lon - dlon, center.lat + dlat, center.lon + dlon)
+def _check_bbox(bbox: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
     south, west, north, east = bbox
     if not all(math.isfinite(v) for v in bbox):
         raise ValueError("bbox values must be finite numbers")
@@ -267,25 +253,35 @@ def area_points(center: LatLon | None = None, radius_km: float | None = None,
         raise ValueError("bbox must be (south, west, north, east) within ±90° / ±180°")
     if north - south > MAX_AREA_SPAN_DEG or east - west > MAX_AREA_SPAN_DEG:
         raise ValueError(f"area spans more than {MAX_AREA_SPAN_DEG:.0f}°; choose a smaller one")
-    mid_lat = math.radians((south + north) / 2)
-    # Choose the spacing up front so the grid never exceeds ~max_points (no oversized first allocation).
-    height_km = (north - south) * 111.2
-    width_km = (east - west) * 111.2 * max(math.cos(mid_lat), 1e-3)
-    estimate = (height_km / spacing_km + 1) * (width_km / spacing_km + 1)
-    if estimate > max_points:
-        spacing_km *= math.sqrt(estimate / max_points) * 1.05
+    return south, west, north, east
+
+
+def area_grid(bbox: tuple[float, float, float, float], spacing_km: float = 10.0,
+              max_points: int = 500) -> tuple[np.ndarray, np.ndarray]:
+    """Latitude and longitude axes of a regular grid over a bbox (south, west, north, east), with at most
+    max_points points together; the spacing grows for large areas."""
+    bbox = _check_bbox(bbox)
+    spacing_km = _initial_spacing(bbox, spacing_km, max_points)
     while True:
-        lats = np.arange(south, north + 1e-9, spacing_km / 111.2)
-        lons = np.arange(west, east + 1e-9, spacing_km / (111.2 * max(math.cos(mid_lat), 1e-3)))
-        grid_lat, grid_lon = (a.ravel() for a in np.meshgrid(lats, lons, indexing="ij"))
-        if center is not None and radius_km is not None:
-            inside = haversine_km(center.lat, center.lon, grid_lat, grid_lon) <= radius_km
-            grid_lat, grid_lon = grid_lat[inside], grid_lon[inside]
-        if len(grid_lat) <= max_points:
-            break
-        spacing_km *= math.sqrt(len(grid_lat) / max_points) * 1.05
-    if len(grid_lat) == 0:
-        if center is not None:
-            return [center]
-        return [LatLon((south + north) / 2, (west + east) / 2)]
-    return [LatLon(float(a), float(b)) for a, b in zip(grid_lat, grid_lon)]
+        lats, lons = _grid_axes(bbox, spacing_km)
+        if len(lats) * len(lons) <= max_points:
+            return lats, lons
+        spacing_km *= 1.05
+
+
+def _km_per_lon(bbox: tuple[float, float, float, float]) -> float:
+    return 111.2 * max(math.cos(math.radians((bbox[0] + bbox[2]) / 2)), 1e-3)
+
+
+def _initial_spacing(bbox: tuple[float, float, float, float], spacing_km: float, max_points: int) -> float:
+    """Spacing for which the bbox grid has about max_points points at most, chosen up front so the first grid
+    is never oversized."""
+    south, west, north, east = bbox
+    estimate = ((north - south) * 111.2 / spacing_km + 1) * ((east - west) * _km_per_lon(bbox) / spacing_km + 1)
+    return spacing_km * math.sqrt(estimate / max_points) * 1.05 if estimate > max_points else spacing_km
+
+
+def _grid_axes(bbox: tuple[float, float, float, float], spacing_km: float) -> tuple[np.ndarray, np.ndarray]:
+    south, west, north, east = bbox
+    return (np.arange(south, north + 1e-9, spacing_km / 111.2),
+            np.arange(west, east + 1e-9, spacing_km / _km_per_lon(bbox)))

@@ -49,8 +49,8 @@ class DownloadBudget:
         if before + nbytes > self.per_request_bytes:
             already = f" ({before / 1e6:.0f} MB already for other models)" if before else ""
             raise SourceError(f"this query would download {(before + nbytes) / 1e6:.0f} MB{already}, more than the "
-                              f"per-query limit of {self.per_request_bytes / 1e6:.0f} MB; use a shorter window, "
-                              f"fewer variables or fewer models (sources)")
+                              f"per-query limit of {self.per_request_bytes / 1e6:.0f} MB; use a shorter time range, "
+                              f"fewer variables or fewer models")
         with self._lock:
             now = self._prune()
             used = sum(r.nbytes for r in self._recent)

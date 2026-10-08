@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from weather_core.geometry import (
-    MAX_ROUTE_SAMPLES, LatLon, area_points, bearing_deg, crosswind, decode_polyline, encode_polyline, haversine_km, headwind,
+    MAX_ROUTE_SAMPLES, LatLon, area_grid, bearing_deg, crosswind, decode_polyline, encode_polyline, haversine_km, headwind,
     parse_gpx, sample_route, simplify,
 )
 
@@ -77,21 +77,21 @@ def test_headwind_sign():
     assert crosswind(20.0, 90.0, 0.0) == pytest.approx(20.0)
 
 
-def test_area_points_cover_circle():
-    center = LatLon(50.0, 7.0)
-    points = area_points(center=center, radius_km=20, spacing_km=5)
-    distances = haversine_km(center.lat, center.lon, np.array([p.lat for p in points]),
-                             np.array([p.lon for p in points]))
-    assert distances.max() <= 20
-    assert 40 <= len(points) <= 60  # ~π·20²/25 ≈ 50
+def test_area_grid_covers_the_box_at_about_10_km():
+    lats, lons = area_grid((50.0, 7.0, 50.5, 7.5), spacing_km=10)
+    assert lats[0] == 50.0 and lats[-1] <= 50.5 and lons[0] == 7.0 and lons[-1] <= 7.5
+    assert np.diff(lats).mean() * 111.2 == pytest.approx(10, rel=0.01)
+    assert np.diff(lons).mean() * 111.2 * np.cos(np.radians(50.25)) == pytest.approx(10, rel=0.01)
 
 
-def test_area_points_are_capped():
-    assert len(area_points(bbox=(45.0, 0.0, 55.0, 20.0), spacing_km=1, max_points=500)) <= 500
+def test_area_grid_is_capped():
+    lats, lons = area_grid((45.0, 0.0, 55.0, 20.0), spacing_km=1, max_points=500)
+    assert len(lats) * len(lons) <= 500
 
 
-def test_tiny_area_falls_back_to_center():
-    assert area_points(center=LatLon(50.0, 7.0), radius_km=0.5, spacing_km=5) == [LatLon(50.0, 7.0)]
+def test_tiny_area_grid_has_a_point():
+    lats, lons = area_grid((50.0, 7.0, 50.01, 7.01))
+    assert len(lats) == len(lons) == 1
 
 
 def test_crafted_polyline_is_rejected_fast():
@@ -119,11 +119,6 @@ def test_long_routes_are_capped():
 
 
 def test_oversized_or_invalid_areas_are_rejected():
-    for kwargs in [dict(center=LatLon(48, 11), radius_km=30000), dict(bbox=(-90.0, -180.0, 90.0, 180.0)),
-                   dict(bbox=(float("nan"), 0.0, 10.0, 10.0)), dict(center=LatLon(48, 11), radius_km=-5)]:
+    for bbox in [(-90.0, -180.0, 90.0, 180.0), (float("nan"), 0.0, 10.0, 10.0), (50.0, 7.0, 49.0, 8.0)]:
         with pytest.raises(ValueError):
-            area_points(**kwargs)
-
-
-def test_large_valid_area_stays_within_point_budget():
-    assert len(area_points(center=LatLon(48, 11), radius_km=1000)) <= 2000
+            area_grid(bbox)

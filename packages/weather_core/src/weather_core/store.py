@@ -82,8 +82,8 @@ class FieldStore:
         return sorted(p.name for p in directory.iterdir()) if directory.exists() else []
 
     def _evict_older(self, source: str, writing: str) -> None:
-        # Never evict the run being written: a query may need an older run (window starting before the newest
-        # runs), and evicting it under its own writes would make every repeat download everything again.
+        # Never evict the run being written: a query may need an older run (a time range starting before the
+        # newest runs), and evicting it under its own writes would make every repeat download everything again.
         with self._lock:
             for name in self.runs(source)[:-self.keep_runs]:
                 if name == writing:
