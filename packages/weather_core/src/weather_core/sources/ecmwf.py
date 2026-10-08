@@ -113,6 +113,9 @@ class EcmwfSource:
     def describe(self) -> dict:
         return {"resolution": self.model.resolution, "note": self.model.note}
 
+    def max_lead_hours(self) -> int:
+        return self.model.steps(datetime(2000, 1, 1, self.model.long_runs[0]))[-1]
+
     def provides(self) -> set[str]:
         base = {name for name, (param, _) in PARAMS.items() if param in self.model.params}
         return {name for name, needs in NEEDS.items() if needs <= base}

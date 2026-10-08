@@ -27,6 +27,7 @@ class StepSampling:
     dt_hours: np.ndarray
     times: list[datetime]  # time of each sample (hourly: the start of its hour)
     valid: np.ndarray | None = None  # per sample: within the run's steps (sample_hours only; else all are)
+    unused: np.ndarray | None = None  # per sample: outside every selected window; reads no steps, values are NaN
 
     def needed_steps(self) -> set[int]:
         """Step indices whose fields must be available."""
@@ -89,17 +90,25 @@ def sample_times(run: datetime, steps: list[int], times: list[datetime], dt_hour
                         list(times))
 
 
-def sample_hours(run: datetime, steps: list[int], hours: list[datetime]) -> StepSampling:
+def sample_hours(run: datetime, steps: list[int], hours: list[datetime],
+                 wanted: np.ndarray | None = None) -> StepSampling:
     """One sample per hour, labelled by the hour's start: interval variables take the step interval containing the
     hour, instants their value at the label. Hours the run doesn't cover are marked invalid (not an error), so a
-    model can answer for the part of a range it reaches."""
+    model can answer for the part of a range it reaches.
+
+    `wanted` marks the hours a query reads (e.g. two afternoons of one place's time axis): the others take the
+    steps of a wanted hour, so they need no fields of their own, and are marked unused."""
     steps_arr = np.asarray(steps, dtype=np.float64)
     starts = np.array([_hours(run, t) for t in hours])
     valid = (starts >= steps_arr[0]) & (starts + 1 <= steps_arr[-1])
-    if not valid.any():
-        raise OutsideForecast(f"hours +{starts.min():.0f}h…+{starts.max():.0f}h of the run; the forecast covers "
-                              f"+{steps[0]}h…+{steps[-1]}h")
+    wanted = np.ones(len(hours), dtype=bool) if wanted is None else np.asarray(wanted, dtype=bool)
+    if not (valid & wanted).any():
+        hours_read = starts[wanted] if wanted.any() else starts
+        raise OutsideForecast(f"hours +{hours_read.min():.0f}h…+{hours_read.max():.0f}h of the run; the forecast "
+                              f"covers +{steps[0]}h…+{steps[-1]}h")
     starts = np.clip(starts, steps_arr[0], steps_arr[-1] - 1)  # invalid hours: any index in range, masked later
+    starts[~wanted] = starts[np.argmax(wanted)]
     interval_step = np.clip(np.searchsorted(steps_arr, starts + 0.5, side="left"), 1, len(steps) - 1)
     lo, w_hi = zip(*(_instant(steps_arr, h) for h in starts))
-    return StepSampling(interval_step, np.array(lo), np.array(w_hi), np.ones(len(hours)), list(hours), valid)
+    return StepSampling(interval_step, np.array(lo), np.array(w_hi), np.ones(len(hours)), list(hours), valid,
+                        None if wanted.all() else ~wanted)

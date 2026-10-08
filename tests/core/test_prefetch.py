@@ -61,6 +61,15 @@ def test_routes_become_their_hours():
     assert query.hours[0] == t0.replace(minute=0) and query.hours[-1] == datetime(2026, 10, 9, 11, tzinfo=timezone.utc)
 
 
+def test_separate_windows_of_one_axis_are_separate_entries():
+    warm, _ = warm_set()
+    start = datetime(2026, 10, 10, 13, tzinfo=timezone.utc)
+    query = hours(start, 30)
+    query = Query(query.lat, query.lon, hours=query.hours, wanted=np.array([True] * 6 + [False] * 18 + [True] * 6))
+    warm.record("a", query, ["precip"])
+    assert [(q.hours[0], len(q.hours)) for _, q, _ in warm.due()] == [(start, 6), (start + 24 * H, 6)]
+
+
 def test_the_set_keeps_the_most_recently_asked_entries():
     warm, clock = warm_set(max_entries=2)
     start = datetime(2026, 10, 10, tzinfo=timezone.utc)
@@ -74,9 +83,16 @@ def test_the_set_keeps_the_most_recently_asked_entries():
 
 
 class Fetching:
-    def __init__(self, name, budget=None, nbytes=0, error=None):
+    def __init__(self, name, budget=None, nbytes=0, error=None, lead_hours=30):
         self.name, self.budget, self.nbytes, self.error = name, budget, nbytes, error
+        self.lead_hours = lead_hours
         self.calls = []
+
+    def provides(self):
+        return {"precip", "t2m"}
+
+    def max_lead_hours(self):
+        return self.lead_hours
 
     def fetch(self, query, variables):
         self.calls.append((query.hours[0], variables))
@@ -116,3 +132,18 @@ def test_answered_queries_are_recorded_for_the_models_that_answered():
     (name, query, variables), = warm.due()
     assert name == "synthetic" and variables == ("precip",)
     assert query.hours[0] == datetime(2026, 10, 8, 10, tzinfo=timezone.utc) and len(query.hours) == 2
+
+
+def test_fully_warm_models_are_fetched_in_chunks_up_to_their_last_step():
+    warm, _ = warm_set()
+    source = Fetching("a", lead_hours=30)
+    Prefetcher([source, Fetching("b")], warm, full_models=["a"], full_variables=["precip", "t2m", "cape"]).refresh()
+    first = NOW.replace(minute=0)
+    assert source.calls == [(first, ("precip", "t2m")), (first + 12 * H, ("precip", "t2m")),
+                            (first + 24 * H, ("precip", "t2m"))]
+
+
+def test_unknown_fully_warm_models_are_rejected():
+    warm, _ = warm_set()
+    with pytest.raises(ValueError, match="unknown models"):
+        Prefetcher([Fetching("a")], warm, full_models=["icon-d2-ruc"])

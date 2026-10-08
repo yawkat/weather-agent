@@ -176,9 +176,12 @@ class Forecaster:
                 per_model = []
                 for source, p in fetched.get(loc, []):
                     s = p.samples()
-                    valid = [t for t, ok in zip(s.times, s.valid if s.valid is not None else [True] * len(s.times))
-                             if ok]
-                    if len(valid) < len(s.times):
+                    n = len(s.times)
+                    read = [(t, ok) for t, ok, unused in zip(s.times, s.valid if s.valid is not None else [True] * n,
+                                                             s.unused if s.unused is not None else [False] * n)
+                            if not unused]
+                    valid = [t for t, ok in read if ok]
+                    if len(valid) < len(read):
                         covered = [rt.format_time(t.timestamp() / 60, self.default_tz)
                                    for t in (valid[0], valid[-1] + timedelta(hours=1))]
                         warnings.append(f"{source.name} covers only {covered[0]} to {covered[1]} of the selected "
@@ -292,8 +295,13 @@ class Forecaster:
                      LON: rt.Coord(rt.labels(round(float(x), 4) for x in lons))}
             points = [LatLon(float(a), float(b)) for a in lats for b in lons]  # lat-major, as location_data expects
             summary = {"area": {"lat_points": len(lats), "lon_points": len(lons)}}
+        # Hours between the selected windows (e.g. the night between two afternoons) stay on the axis, unread.
+        minutes = [int(t.timestamp() // 60) for t in hours]
+        wanted = np.array([any(a <= m < b for a, b in demand.windows) for m in minutes]) if demand.windows else None
+        if wanted is not None and not wanted.any():
+            raise ExprError(f"{loc.describe()}: the selected time range contains no whole hour")
         query = Query(np.array([p.lat for p in points]), np.array([p.lon for p in points]), area=bool(space),
-                      hours=hours)
+                      hours=hours, wanted=None if wanted is None or wanted.all() else wanted)
         lat, lon = (points[0].lat, points[0].lon) if loc.kind == "point" else (math.nan, math.nan)
         return _Resolved(query, time_coord, space, sources, variables, lat, lon, summary)
 

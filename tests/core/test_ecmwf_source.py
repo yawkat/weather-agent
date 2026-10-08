@@ -124,6 +124,17 @@ def test_fetch_downloads_what_prepare_reads(source):
     assert source.server.downloads == count
 
 
+def test_hours_between_windows_are_not_downloaded(source):
+    start = RUN + timedelta(hours=24)
+    hours = [start + timedelta(hours=i) for i in range(27)]
+    wanted = np.array([True] * 3 + [False] * 21 + [True] * 3)  # +24…+26 h and +48…+50 h
+    query = Query(np.array([50.1]), np.array([7.3]), hours=hours, wanted=wanted)
+    result = source.samples(query, ["precip"])
+    assert source.server.downloads == 4  # steps +24/+27 and +48/+51, not the 7 in between
+    precip = result.samples.variables["precip"][0]
+    assert np.isnan(precip[3:24]).all() and np.isfinite(precip[:3]).all() and np.isfinite(precip[24:]).all()
+
+
 def test_unpublished_steps_are_reported(source):
     start = RUN + timedelta(hours=100)
     query = hourly(start, 3)

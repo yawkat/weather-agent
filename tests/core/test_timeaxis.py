@@ -55,3 +55,17 @@ def test_hours_beyond_the_run_are_marked_invalid():
 def test_outside_forecast():
     with pytest.raises(OutsideForecast):
         sample_hours(RUN, [0, 3], hourly(3, 6))
+
+
+def test_hours_between_selected_windows_read_no_steps():
+    steps = list(range(0, 49))
+    wanted = np.array([True] * 3 + [False] * 18 + [True] * 3)  # 10–12 h and 31–33 h
+    sampling = sample_hours(RUN, steps, hourly(10, 34), wanted)
+    assert sampling.needed_steps() == {10, 11, 12, 13, 31, 32, 33, 34}
+    assert sampling.unused.tolist() == (~wanted).tolist()
+
+
+def test_wanted_hours_outside_the_run_are_outside_the_forecast():
+    wanted = np.array([False, False, True])
+    with pytest.raises(OutsideForecast):
+        sample_hours(RUN, [0, 3], hourly(1, 4), wanted)

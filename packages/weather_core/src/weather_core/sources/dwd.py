@@ -142,6 +142,9 @@ class DwdIconSource:
             needs = needs - ({"td2m"} - self._base())  # humidity only refines the heat index
         return needs
 
+    def max_lead_hours(self) -> int:
+        return self.model.last_step
+
     def provides(self) -> set[str]:
         base = self._base()
         return {name for name in NEEDS if self._needs(name) <= base}

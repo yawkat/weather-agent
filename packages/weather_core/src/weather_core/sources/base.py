@@ -51,6 +51,7 @@ class Query:
     lat: np.ndarray
     lon: np.ndarray
     hours: list[datetime] | None = None  # one sample per hour (see sample_hours)
+    wanted: np.ndarray | None = None  # hourly: the hours the query reads (None = all); the others stay NaN
     times: list[datetime] | None = None  # route: one time per point
     dt_hours: np.ndarray | None = None  # route: riding time per point
     bearing: np.ndarray | None = None  # route: direction of travel per point
@@ -69,6 +70,7 @@ class SourceSamples:
     bytes_downloaded: int = 0
     attribution: dict = field(default_factory=dict)
     valid: np.ndarray | None = None  # per sample, for hourly queries: the run covers it (else values are NaN)
+    unused: np.ndarray | None = None  # per sample: outside every selected window (values are NaN)
 
 
 @dataclass
@@ -87,8 +89,13 @@ class Prepared:
     def samples(self) -> SourceSamples:
         sampling = sampling_for(self.query, self.run, self.steps)
         samples = assemble(self.query, sampling, self.base_per_step, self.interval_vars, self.unavailable)
-        return SourceSamples(samples, self.info, sampling.times, self.bytes_downloaded,
-                             self.attribution(sampling.times), sampling.valid)
+        read = [t for t, u in zip(sampling.times, _flags(sampling.unused, len(sampling.times))) if not u]
+        return SourceSamples(samples, self.info, sampling.times, self.bytes_downloaded, self.attribution(read),
+                             sampling.valid, sampling.unused)
+
+
+def _flags(mask: np.ndarray | None, n: int) -> list[bool]:
+    return [False] * n if mask is None else mask.tolist()
 
 
 class SourceError(Exception):
@@ -113,7 +120,7 @@ def runs_by_coverage(candidates: list[datetime], sampling: Callable[[datetime], 
 def sampling_for(query: Query, run: datetime, steps: list[int]) -> StepSampling:
     if query.is_route:
         return sample_times(run, steps, query.times, query.dt_hours)
-    return sample_hours(run, steps, query.hours)
+    return sample_hours(run, steps, query.hours, query.wanted)
 
 
 def assemble(query: Query, sampling: StepSampling, base_per_step: dict[str, dict[int, np.ndarray]],
@@ -130,9 +137,12 @@ def assemble(query: Query, sampling: StepSampling, base_per_step: dict[str, dict
         values = extract(per_step, diagonal=query.is_route)
         if not query.is_route and not query.area:
             values = values[:, :, 0]
-        if sampling.valid is not None and not sampling.valid.all():
+        missing = None if sampling.valid is None else ~sampling.valid
+        if sampling.unused is not None:
+            missing = sampling.unused if missing is None else missing | sampling.unused
+        if missing is not None and missing.any():
             values = np.array(values, dtype=np.float64)
-            values[:, ~sampling.valid] = np.nan
+            values[:, missing] = np.nan
         arrays[name] = values
     bearing = query.bearing if query.is_route else None
     variables = derive(arrays, bearing=bearing)

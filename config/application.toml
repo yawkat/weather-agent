@@ -42,6 +42,10 @@ mirrors = '${WEATHER_ECMWF_MIRRORS:`https://storage.googleapis.com/ecmwf-open-da
 # RUC-EPS isn't in `models`: a new run every hour, for questions about the next few hours.
 enabled = '${WEATHER_PREFETCH:true}'
 interval = '10m'
+# Models to keep fully warm: every step of the newest run for `full-variables`, e.g. 'icon-d2-eps,icon-eu-eps'
+# (~85 GB of downloads a day, ~70 GB of cache). That needs more hourly budget than the default leaves prefetch:
+# raise weather.download.max-mb-per-hour (e.g. to 40000).
+full-models = '${WEATHER_PREFETCH_FULL_MODELS:}'
 
 # One client per upstream (http_fetcher.Fetchers). Request URLs are absolute, so `url` is only a default.
 [micronaut.http.services.ecmwf]
