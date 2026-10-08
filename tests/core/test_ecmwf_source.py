@@ -76,6 +76,10 @@ class FakeDecoder:
         return out
 
 
+def hourly(start, length):
+    return Query(np.array([50.1]), np.array([7.3]), hours=[start + timedelta(hours=i) for i in range(length)])
+
+
 @pytest.fixture
 def source(tmp_path):
     server = FakeServer(published_until=60)
@@ -85,17 +89,17 @@ def source(tmp_path):
     return src
 
 
-def test_point_window(source):
+def test_point_hours(source):
     start = RUN + timedelta(hours=24)
-    query = Query(np.array([50.1]), np.array([7.3]), window=(start, start + timedelta(hours=6)))
+    query = hourly(start, 6)
     result = source.samples(query, ["precip", "t2m", "gust", "wind"])
     s = result.samples
     assert result.info.run == RUN and result.info.members == MEMBERS
-    # Two 3-hourly intervals, each split in halves; member m has m mm/h.
-    assert s.dt_hours.tolist() == [1.5, 1.5, 1.5, 1.5]
+    # Six hours across two 3-hourly intervals; member m has m mm/h.
+    assert s.dt_hours.tolist() == [1.0] * 6
     assert s.variables["precip"][:, 0] == pytest.approx(np.arange(1, MEMBERS + 1), rel=1e-5)
-    # Instant temperature at the steps and window edges (24, 27, 27, 30 h): 10 °C + 0.1 K/h.
-    assert s.variables["t2m"][0] == pytest.approx([12.4, 12.7, 12.7, 13.0], abs=1e-3)
+    # Instant temperature at the start of each hour (+24 … +29 h, interpolated between steps): 10 °C + 0.1 K/h.
+    assert s.variables["t2m"][0] == pytest.approx([12.4, 12.5, 12.6, 12.7, 12.8, 12.9], abs=1e-3)
     assert s.variables["gust"][0, 0] == pytest.approx(36.0)
     assert s.variables["wind"][0, 0] == pytest.approx(np.hypot(18, 18))
     assert result.attribution["run"] == "2026-10-07T00:00Z"
@@ -104,7 +108,7 @@ def test_point_window(source):
 
 def test_cached_steps_are_not_downloaded_again(source):
     start = RUN + timedelta(hours=24)
-    query = Query(np.array([50.1]), np.array([7.3]), window=(start, start + timedelta(hours=6)))
+    query = hourly(start, 6)
     source.samples(query, ["precip"])
     count = source.server.downloads
     again = source.samples(query, ["precip"])
@@ -113,30 +117,28 @@ def test_cached_steps_are_not_downloaded_again(source):
 
 def test_unpublished_steps_are_reported(source):
     start = RUN + timedelta(hours=100)
-    query = Query(np.array([50.1]), np.array([7.3]), window=(start, start + timedelta(hours=3)))
+    query = hourly(start, 3)
     with pytest.raises(SourceError):
         source.samples(query, ["precip"])
 
 
-def test_one_hour_windows_use_exact_bounds(source):
-    from weather_agent.sql_engine import DuckDbEngine
+def test_hourly_samples_between_3_hourly_steps(source):
     from weather_core.forecast import Forecaster
 
-    forecaster = Forecaster([source], DuckDbEngine(512, 2, 10000, 500), default_tz="UTC",
-                            clock=lambda: RUN + timedelta(hours=8))
-    # Member m rains m mm/h, so a 1-hour window has m mm: P(rain <= 10.5) = 10/50 for every window,
-    # including windows that don't contain a 3-hourly model step.
-    result = forecaster.forecast("""
-        SELECT window_start, prob(rain <= 10.5) AS p FROM per_member GROUP BY ALL ORDER BY window_start""",
-        "2026-10-08T00:00+00:00", "2026-10-08T06:00+00:00", lat=50.1, lon=7.3, window_hours=1)["result"]
+    forecaster = Forecaster([source], default_tz="UTC", clock=lambda: RUN + timedelta(hours=8))
+    # Member m rains m mm/h, so each hour has m mm: P(rain <= 10.5) = 10/50 for every hour, including hours
+    # between 3-hourly model steps.
+    result = forecaster.forecast(
+        'wx = forecast().interp(lat=50.1, lon=7.3).sel(time=slice("2026-10-08T00:00+00:00", '
+        '"2026-10-08T06:00+00:00"))\n(wx.precip <= 10.5).mean("member")')["result"]
     assert len(result["rows"]) == 6, result
-    assert all(p == pytest.approx(0.2) for _, p in result["rows"]), result
+    assert all(p == pytest.approx(0.2) for _, _, p in result["rows"]), result
 
 
 def test_temp_files_are_removed_when_planning_fails(source, tmp_path):
     start = RUN + timedelta(hours=57)
     # +57h…+63h: step 60 is published, step 63 isn't, so planning fails after the first temp file exists.
-    query = Query(np.array([50.1]), np.array([7.3]), window=(start, start + timedelta(hours=6)))
+    query = hourly(start, 6)
     with pytest.raises(SourceError):
         source.samples(query, ["precip"])
     assert not list(tmp_path.glob("*.grib2"))
@@ -144,7 +146,7 @@ def test_temp_files_are_removed_when_planning_fails(source, tmp_path):
 
 def test_missing_parameter_makes_only_its_variables_unavailable(source):
     start = RUN + timedelta(hours=42)
-    query = Query(np.array([50.1]), np.array([7.3]), window=(start, start + timedelta(hours=6)))
+    query = hourly(start, 6)
     result = source.samples(query, ["precip", "gust"])
     assert "gust" in result.samples.unavailable
     assert result.samples.variables["precip"][:, 0] == pytest.approx(np.arange(1, MEMBERS + 1), rel=1e-5)
@@ -157,7 +159,7 @@ def test_download_budget_is_enforced(tmp_path):
     src = EcmwfSource(IFS_ENS, FakeServer(published_until=60), FakeDecoder(), FieldStore(tmp_path),
                       region=Region(45, 0, 55, 15), clock=lambda: RUN + timedelta(hours=8), grid=GRID, budget=budget)
     start = RUN + timedelta(hours=24)
-    query = Query(np.array([50.1]), np.array([7.3]), window=(start, start + timedelta(hours=24)))
+    query = hourly(start, 24)
     with pytest.raises(SourceError, match="per-query limit"):
         src.samples(query, ["precip", "t2m", "wind", "gust"])
 

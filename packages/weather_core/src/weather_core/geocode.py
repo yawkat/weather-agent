@@ -72,7 +72,7 @@ class Geocoder:
                     "lat": round(place.lat, 5),
                     "lon": round(place.lon, 5),
                     "label": place.label,
-                    # Ready for forecast(places=…); the name is the caller's, so it can't contain ';' or '@'.
+                    # Ready for places("…") in forecast queries; the name is the caller's, so it can't contain ';' or '@'.
                     "place": f"{name.replace('@', ' ')}@{place.lat:.5f},{place.lon:.5f}",
                 })
         return {"results": results, "attribution": ATTRIBUTION}

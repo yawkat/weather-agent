@@ -65,73 +65,41 @@ def test_fetcher_timeout(my_context):
         socket.close()
 
 
-def _mcp(context, method, params):
-    """One JSON-RPC request to the running server's /mcp endpoint."""
-    import json
-
+def test_mcp_path_without_key(my_context):
+    """No key in the test config: MCP answers at /mcp (through the /mcp{/key} route) and nothing below it."""
     import java
+
     from micronaut.runtime.server import EmbeddedServer
 
-    server = context.getBean(EmbeddedServer)
+    server = my_context.getBean(EmbeddedServer)
     if not server.isRunning():
         server.start()
     HttpClient = java.type("java.net.http.HttpClient")
     HttpRequest = java.type("java.net.http.HttpRequest")
-    BodyHandlers = java.type("java.net.http.HttpResponse$BodyHandlers")
     URI = java.type("java.net.URI")
-    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
-    request = (HttpRequest.newBuilder(URI.create(f"http://localhost:{server.getPort()}/mcp"))
-               .header("Content-Type", "application/json")
-               .header("Accept", "application/json, text/event-stream")
-               .POST(HttpRequest.BodyPublishers.ofString(body)).build())
-    response = HttpClient.newHttpClient().send(request, BodyHandlers.ofString())
+    client = HttpClient.newHttpClient()
+    body = '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+    def post(path):
+        request = (HttpRequest.newBuilder(URI.create(f"http://localhost:{server.getPort()}{path}"))
+                   .header("Content-Type", "application/json")
+                   .header("Accept", "application/json, text/event-stream")
+                   .POST(HttpRequest.BodyPublishers.ofString(body)).build())
+        return client.send(request, java.type("java.net.http.HttpResponse").BodyHandlers.ofString())
+
+    response = post("/mcp")
     assert response.statusCode() == 200, response.body()
-    return json.loads(str(response.body()))["result"]
+    assert "forecast" in response.body()
+    assert "weather_query_help" in response.body()
+    assert post("/mcp/" + "k" * 40).statusCode() == 404
 
 
-def test_meteogram_tool_links_its_view(my_context):
-    tools = {t["name"]: t for t in _mcp(my_context, "tools/list", {})["tools"]}
-    meteogram = tools["show_meteogram"]
-    uri = meteogram["_meta"]["ui"]["resourceUri"]
-    assert uri == "ui://weather-agent/meteogram.html"
-    assert meteogram["inputSchema"]["required"] == ["lat", "lon"]
-    assert "forecast" in tools  # annotated tools are still there
+def test_bad_access_key_stops_startup():
+    """McpKeyFilter is created at startup, so a bad key fails the context without any request."""
+    import java
 
-    contents = _mcp(my_context, "resources/read", {"uri": uri})["contents"][0]
-    assert contents["mimeType"] == "text/html;profile=mcp-app"
-    assert "ui/initialize" in contents["text"]
-
-
-def test_meteogram_tool_returns_summary_and_chart(my_context):
-    import json
-
-    from weather_agent.forecast_service import ForecastService
-
-    forecaster = my_context.getBean(ForecastService).forecaster
-    calls = []
-
-    def meteogram(lat, lon, **kwargs):
-        calls.append((lat, lon, kwargs))
-        return {"models": [{"model": "m", "daily": []}]}, {"models": [{"model": "m", "times": [0, 3600]}]}
-
-    forecaster.meteogram = meteogram
-    try:
-        result = _mcp(my_context, "tools/call", {"name": "show_meteogram",
-                                                 "arguments": {"lat": 50.7, "lon": 7.1, "label": "Bonn"}})
-        assert not result["isError"]
-        assert json.loads(result["content"][0]["text"])["models"][0]["model"] == "m"
-        assert result["structuredContent"]["models"][0]["times"] == [0, 3600]
-        assert calls == [(50.7, 7.1, {"start": None, "end": None, "variables": None, "sources": None,
-                                      "label": "Bonn"})]
-
-        def failing(lat, lon, **kwargs):
-            raise ValueError("end must be after start")
-
-        forecaster.meteogram = failing
-        error = _mcp(my_context, "tools/call", {"name": "show_meteogram", "arguments": {"lat": 50.7, "lon": 7.1}})
-        assert error["isError"] and error["content"][0]["text"] == "end must be after start"
-        # The SDK checks arguments against the input schema before the tool runs.
-        invalid = _mcp(my_context, "tools/call", {"name": "show_meteogram", "arguments": {"lat": "x", "lon": 7.1}})
-        assert invalid["isError"]
-    finally:
-        del forecaster.meteogram
+    ApplicationContext = java.type("io.micronaut.context.ApplicationContext")
+    properties = java.type("java.util.HashMap")()
+    properties.put("weather.access-key", "too-short")
+    with pytest.raises(BaseException, match="access key must be"):
+        ApplicationContext.builder().environments("test").properties(properties).start().close()

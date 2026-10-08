@@ -1,16 +1,17 @@
 # weather-agent
 
 MCP server answering weather questions from open ensemble forecasts (ECMWF IFS/AIFS ENS; DWD ICON-EU-EPS, ICON-D2-EPS, ICON-D2-RUC-EPS).
-Agents query per-member samples with DuckDB SQL through one `forecast` tool.
+Agents query per-member samples through one `forecast` tool, in a subset of xarray that the server parses and
+interprets itself (`weather_core/expr/`, documented in `docs/query-language.md`).
 
 ## Layout
 
-- `packages/weather_core/`: pure-Python engine (sources, sampling, geometry, cube building). It's a uv workspace
+- `packages/weather_core/`: pure-Python engine (sources, sampling, geometry, query language). It's a uv workspace
   member installed editable into the venv, because the Pyronaut processor would otherwise generate Java for every
   class (pyronaut#331).
-- `src/weather_agent/`: Micronaut/MCP glue (tools, fetcher on Micronaut's HTTP client, DuckDB engine).
-- `src-java/at/yawk/weatheragent/`: Java helpers where performance or interop needs them (GRIB decoding, DuckDB
-  loading, Host/Origin filter, GraalPy native access).
+- `src/weather_agent/`: Micronaut/MCP glue (tools, fetcher on Micronaut's HTTP client).
+- `src-java/at/yawk/weatheragent/`: Java helpers where performance or interop needs them (GRIB decoding,
+  Host/Origin and secret-path filters, GraalPy native access).
 - `nix/`: pure Nix build (venv from `uv.lock`, downloads as a fixed-output derivation, offline JAR build,
   `weather-agent` wrapper) and a VM
   test (`checks.x86_64-linux.vm`). Hosts (goliath) define the systemd unit themselves; `nix/test.nix` shows one.
@@ -33,8 +34,10 @@ Agents query per-member samples with DuckDB SQL through one `forecast` tool.
 
 ## Design rules
 
-- Results are per model; no cross-model weighting or pooled probabilities. The agent decides which models to
-  trust.
+- The server never weights or pools models on its own: what it returns is per model unless the query asks
+  otherwise. Agents may combine models and members explicitly (worst model, agreement, chosen weights); they
+  decide which models to trust. Make per-model answers the easy path, and document the pitfalls of pooling
+  (member counts differ, so pooling silently weights models).
 - Download lazily, only the fields a query needs, within the download budget. Keep only the latest runs.
 - Every output carries attribution down to model and run (DWD: "Datenbasis: Deutscher Wetterdienst, eigene
   Bearbeitung"; ECMWF: see `sources/ecmwf.py`).
