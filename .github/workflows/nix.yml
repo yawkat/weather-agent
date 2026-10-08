@@ -50,7 +50,7 @@ jobs:
           mkdir -p "$NIX_LOCAL_CACHE"
           printf 'StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 30\n' > "$NIX_LOCAL_CACHE/nix-cache-info"
 
-      # Fails with a hash mismatch if nix/deps.sha256 is out of date with pyproject.toml.
+      # Fails with a hash mismatch if nix/deps.x86_64-linux.sha256 is out of date with pyproject.toml.
       - name: Check flake
         run: nix flake check -L
 
