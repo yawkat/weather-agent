@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from weather_core.grid import Region, RegularGrid
-from weather_core.sources.base import Query, SourceError
+from weather_core.sources.base import NotPublished, Query, SourceError
 from weather_core.sources.ecmwf import IFS_ENS, EcmwfSource
 from weather_core.sources.mirrors import Mirrors
 from weather_core.store import FieldStore
@@ -184,6 +184,83 @@ def test_download_budget_is_enforced(tmp_path):
         src.samples(query, ["precip", "t2m", "wind", "gust"])
 
 
+class Uploading(FakeServer):
+    """The 06z run's index is out (on the origin), but its files can't be fetched yet: the origin throttles and
+    mirrors lag. Its index has the 00z run's layout."""
+
+    def __init__(self):
+        super().__init__(published_until=60)
+        self.failed = 0
+
+    def get(self, url):
+        return super().get(url.replace("20261007060000", "20261007000000"))
+
+    def _download(self, url, ranges, dest):
+        if "20261007060000" in url:
+            self.failed += 1
+            if url.startswith(ORIGIN):
+                raise SourceError(f"{url}: HTTP 429")
+            raise NotPublished(f"{url}: HTTP 404")
+        return super()._download(url, ranges, dest)
+
+
+ORIGIN = "https://data.ecmwf.int/forecasts"
+
+
+def uploading_source(tmp_path, server, **kwargs):
+    return EcmwfSource(IFS_ENS, server, FakeDecoder(), FieldStore(tmp_path), region=Region(45, 0, 55, 15),
+                       clock=lambda: RUN + timedelta(hours=8), grid=GRID, **kwargs)
+
+
+def test_a_listed_run_that_cant_be_fetched_falls_back_to_the_previous_run(tmp_path):
+    server = Uploading()
+    src = uploading_source(tmp_path, server)
+    query = hourly(RUN + timedelta(hours=24), 6)
+    assert src.find_run(query) == RUN + timedelta(hours=6)
+    assert src.samples(query, ["precip"]).info.run == RUN
+    assert server.failed == 1
+    # For a while, the next query goes straight to the run that works.
+    assert src.samples(hourly(RUN + timedelta(hours=30), 3), ["t2m"]).info.run == RUN
+    assert server.failed == 1
+
+
+def test_budget_refusals_dont_fall_back(tmp_path):
+    from weather_core.budget import BudgetExceeded, DownloadBudget
+
+    server = Uploading()
+    src = uploading_source(tmp_path, server, budget=DownloadBudget(per_request_bytes=10, per_hour_bytes=10**9))
+    with pytest.raises(BudgetExceeded):
+        src.samples(hourly(RUN + timedelta(hours=24), 6), ["precip"])
+    assert server.downloads == 0 and server.failed == 0
+
+
+def test_failed_attempts_dont_count_against_the_query(tmp_path):
+    from weather_core.budget import DownloadBudget
+
+    query = hourly(RUN + timedelta(hours=24), 6)
+    size = uploading_source(tmp_path / "probe", FakeServer(published_until=60)).samples(query, ["precip"])
+    size = size.bytes_downloaded
+    server = Uploading()
+    # The 06z run fails on the origin (429) and the mirror (404); the 00z run then has to fit the same query.
+    src = uploading_source(tmp_path / "src", server, hosts=Mirrors(ORIGIN, ["https://mirror.example"]),
+                           budget=DownloadBudget(per_request_bytes=size * 3 // 2, per_hour_bytes=10**9))
+    assert src.samples(query, ["precip"]).info.run == RUN
+    assert server.failed == 2
+
+
+def test_older_runs_are_only_looked_up_when_needed(tmp_path):
+    class OlderIndexFails(FakeServer):
+        """The 06z run works; asking for the 00z run's index fails on every host."""
+
+        def get(self, url):
+            if "20261007000000" in url:
+                raise SourceError(f"{url}: HTTP 503")
+            return super().get(url.replace("20261007060000", "20261007000000"))
+
+    src = uploading_source(tmp_path, OlderIndexFails(published_until=60))
+    assert src.samples(hourly(RUN + timedelta(hours=24), 6), ["precip"]).info.run == RUN + timedelta(hours=6)
+
+
 def test_route_samples_use_their_own_point(source):
     # Instant temperature is uniform in space here, so the route value must equal the point value at that time.
     t0 = RUN + timedelta(hours=24)
@@ -252,9 +329,14 @@ def test_throttled_origin_falls_back_to_mirror(tmp_path):
 def test_fallback_download_counts_against_the_budget(tmp_path):
     class Budget:
         reserved = []
+        settled = []
 
         def reserve(self, nbytes):
             self.reserved.append(nbytes)
+            return len(self.reserved) - 1
+
+        def settle(self, reservation, actual):
+            self.settled.append((reservation, actual))
 
     budget = Budget()
     fetcher = Throttled(FakeServer(published_until=60), "https://origin.test/")
@@ -265,3 +347,5 @@ def test_fallback_download_counts_against_the_budget(tmp_path):
                       region=Region(45, 0, 55, 15), clock=lambda: RUN + timedelta(hours=8), grid=GRID)
     result = src.samples(hourly(RUN + timedelta(hours=24), 6), ["precip"])
     assert budget.reserved == [result.bytes_downloaded] * 2
+    # The throttled attempt is released before the repeat; the repeat counts what it downloaded.
+    assert budget.settled == [(0, 0), (1, result.bytes_downloaded)]
