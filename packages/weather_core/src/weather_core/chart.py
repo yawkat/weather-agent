@@ -7,6 +7,7 @@ The view picks the form from the dimensions left in each field, as docs/query-la
 The query decides what is shown; the view only draws it.
 """
 
+import io
 import json
 import math
 from functools import cache
@@ -121,43 +122,111 @@ def _map_bounds(values: list[rt.Arr]) -> tuple[float, float, float, float] | Non
     return min(lats), min(lons), max(lats), max(lons)
 
 
+# The map under maps: Natural Earth 1:10m and GeoNames places, built by scripts/make_basemap.py.
+_MAP_SOURCE = "Natural Earth (public domain), GeoNames (CC BY 4.0)"
+_MAP_AREAS = ("land", "lake")
+_MAP_LINES = ("lake_shore", "coastline", "border", "river_major", "river", "motorway", "road")
+_MAP_WIDTH = 600  # drawing units of the view's maps; the map is simplified to about half of one
+_MAP_PLACES = 150  # largest places in the map; the view labels those that fit
+
+
 @cache
-def _basemap_data() -> dict:
-    return json.loads(resources.files("weather_core").joinpath("data/basemap.json").read_text())
+def _basemap_data() -> dict[str, np.ndarray]:
+    raw = resources.files("weather_core").joinpath("data/basemap.npz").read_bytes()
+    with np.load(io.BytesIO(raw)) as npz:
+        data = {name: npz[name] for name in npz.files}
+    data["places.names"] = data["places.names"].tobytes().decode().split("\n")
+    return data
 
 
 def basemap(south: float, west: float, north: float, east: float) -> dict:
-    """Coastlines and borders (Natural Earth) around a map, as lists of [lat, lon, lat, lon, …] in degrees."""
+    """The map around a map's points: land and lakes as rings (cut at the box and between tiles, so only for
+    filling), lake shores, coastlines, borders, rivers and roads as lines (each
+    a list of [lat, lon, lat, lon, …] in degrees), and the largest places ([lat, lon, name], largest first).
+
+    Detail follows the map's scale, like a web map's zoom level: features Natural Earth shows from that zoom on,
+    simplified to about half a drawing unit."""
     # At least half a degree, so a small area or a single place still shows where it is.
     margin = max(_MAP_MARGIN, 0.15 * max(north - south, east - west))
     box = (south - margin, west - margin, north + margin, east + margin)
+    k = math.cos(math.radians((box[0] + box[2]) / 2))
+    degrees_per_unit = max(box[2] - box[0], (box[3] - box[1]) * k) / _MAP_WIDTH
+    # Web map zoom with the same scale (256-pixel tiles of 360° of longitude at zoom 0), plus one: the map has
+    # little else on it, so it can show more than a web map would.
+    zoom = math.log2(360 * k / (256 * degrees_per_unit)) + 1
+    tolerance = 50 * degrees_per_unit  # half a unit, in hundredths of a degree
     data = _basemap_data()
-    return {
-        "bounds": [round(x, 4) for x in box],
-        "coastline": _clip(data["coastline"], box),
-        "borders": _clip(data["borders"], box),
-        "source": data["source"],
-    }
-
-
-def _clip(lines: list[list[int]], box: tuple[float, float, float, float]) -> list[list[float]]:
-    """Parts of the lines inside the box, plus one point beyond each end so lines reach the edge."""
-    s, w, n, e = (round(x * 100) for x in box)
-    out = []
-    for line in lines:
-        lat = line[0::2]
-        lon = line[1::2]
-        inside = [s <= a <= n and w <= b <= e for a, b in zip(lat, lon)]
-        i = 0
-        while i < len(inside):
-            if not inside[i]:
-                i += 1
-                continue
-            j = i
-            while j < len(inside) and inside[j]:
-                j += 1
-            a, b = max(i - 1, 0), min(j + 1, len(inside))
-            if b - a > 1:
-                out.append([x / 100 for k in range(a, b) for x in (lat[k], lon[k])])
-            i = j
+    ibox = tuple(round(x * 100) for x in box)
+    out = {"bounds": [round(x, 4) for x in box], "source": _MAP_SOURCE}
+    for name in _MAP_AREAS + _MAP_LINES:
+        out[name] = _map_layer(data, name, ibox, zoom, tolerance, area=name in _MAP_AREAS)
+    s, w, n, e = ibox
+    lat, lon = data["places.lat"], data["places.lon"]
+    hits = np.nonzero((lat >= s) & (lat <= n) & (lon >= w) & (lon <= e))[0][:_MAP_PLACES]
+    names = data["places.names"]
+    out["places"] = [[int(lat[i]) / 100, int(lon[i]) / 100, names[i]] for i in hits.tolist()]
     return out
+
+
+def _map_layer(data: dict, name: str, box: tuple[int, ...], zoom: float, tolerance: float, area: bool) -> list:
+    s, w, n, e = box
+    start, fbox = data[f"{name}.start"], data[f"{name}.box"].reshape(-1, 4)
+    # Features shown at this zoom, overlapping the box and at least about a unit across.
+    size = np.maximum(fbox[:, 2] - fbox[:, 0], fbox[:, 3] - fbox[:, 1])
+    features = np.nonzero((data[f"{name}.zoom"] <= round(zoom * 10)) & (fbox[:, 0] <= n) & (fbox[:, 2] >= s)
+                          & (fbox[:, 1] <= e) & (fbox[:, 3] >= w) & (size >= tolerance))[0]
+    if not len(features):
+        return []
+    # Their points, with the feature each belongs to, simplified to the tolerance.
+    lengths = start[features + 1] - start[features]
+    first = np.cumsum(lengths) - lengths
+    points = np.arange(int(lengths.sum())) + np.repeat(start[features] - first, lengths)
+    owner = np.repeat(np.arange(len(features)), lengths)
+    keep = data[f"{name}.sig"][points] >= tolerance
+    points, owner = points[keep], owner[keep]
+    lat, lon = data[f"{name}.lat"][points], data[f"{name}.lon"][points]
+    breaks = np.nonzero(owner[1:] != owner[:-1])[0] + 1
+    if area:
+        out = []
+        for a, b in zip(np.r_[0, breaks], np.r_[breaks, len(points)]):
+            ring = np.column_stack((lat[a:b], lon[a:b])).astype(np.float64)
+            lo, hi = ring.min(axis=0), ring.max(axis=0)
+            if lo[0] < s or hi[0] > n or lo[1] < w or hi[1] > e:
+                ring = _clip_ring(ring, box)
+            if len(ring) >= 3:
+                out.append((np.round(ring.reshape(-1)) / 100).tolist())
+        return out
+    # Lines: the segments that may cross the box (their bounding box overlaps it), so lines reach its edge.
+    segment = ((owner[1:] == owner[:-1]) & (np.minimum(lat[1:], lat[:-1]) <= n) & (np.maximum(lat[1:], lat[:-1]) >= s)
+               & (np.minimum(lon[1:], lon[:-1]) <= e) & (np.maximum(lon[1:], lon[:-1]) >= w))
+    flat = (np.column_stack((lat, lon)).reshape(-1) / 100).tolist()
+    cuts = np.nonzero(~segment)[0] + 1
+    out = []
+    for a, b in zip(np.r_[0, cuts], np.r_[cuts, len(points)]):
+        if b - a > 1:
+            out.append(flat[2 * a:2 * b])
+    return out
+
+
+def _clip_ring(ring: np.ndarray, box: tuple[int, ...]) -> np.ndarray:
+    """Sutherland-Hodgman: the part of a ring (rows of lat, lon) inside the box, which may run along its edge."""
+    s, w, n, e = box
+    for axis, value, sign in ((0, s, 1), (0, n, -1), (1, w, 1), (1, e, -1)):
+        if not len(ring):
+            break
+        keep = (ring[:, axis] - value) * sign >= 0
+        if keep.all():
+            continue
+        prev, keep_prev = np.roll(ring, 1, axis=0), np.roll(keep, 1)
+        cross = keep != keep_prev
+        delta = np.where(cross, ring[:, axis] - prev[:, axis], 1.0)
+        crossing = prev + (ring - prev) * ((value - prev[:, axis]) / delta)[:, None]
+        crossing[:, axis] = value
+        # Per point: where the edge crosses into or out of the box, then the point if it's inside.
+        counts = cross.astype(np.int64) + keep
+        at = np.cumsum(counts) - counts
+        out = np.empty((int(counts.sum()), 2))
+        out[at[cross]] = crossing[cross]
+        out[(at + cross)[keep]] = ring[keep]
+        ring = out
+    return ring

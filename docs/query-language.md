@@ -167,9 +167,10 @@ Apps view, `config/mcp-apps/forecast.html`), next to the answer the agent gets. 
 
 Within those, `model` is colour (or one map per model), `member` thin lines (with the 10–90 % band and median the
 view draws for orientation), `quantile` bands, and `point` with an x axis one graph per place. Maps can't show
-every member: the query must reduce `member` first. Coastlines and borders come from Natural Earth (public
-domain), clipped around the map (`scripts/make_basemap.py`). The agent writes the query; the view only picks
-colours.
+every member: the query must reduce `member` first. Under maps lies a basemap: land, lakes, coastlines, borders,
+rivers and main roads from Natural Earth 1:10m (public domain), and town names from GeoNames (CC BY 4.0, towns of
+15,000 or more), with detail to the map's scale like a web map's zoom levels (`scripts/make_basemap.py`,
+`weather_core.chart.basemap`). The agent writes the query; the view only picks colours.
 
 ## Examples
 

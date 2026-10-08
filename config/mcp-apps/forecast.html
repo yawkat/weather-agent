@@ -24,6 +24,7 @@
   --grid: #e1e0d9;
   --axis: #c3c2b7;
   --land: #52514e;
+  --water: #dce7f1; --ground: #f3f2ee; --river: #3b7cc4; --road: #6b5a48;
   --ring: rgba(11, 11, 11, 0.10);
   --wash: rgba(11, 11, 11, 0.05);
   --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
@@ -37,6 +38,7 @@
     --ink: var(--color-text-primary, #ffffff);
     --ink-2: var(--color-text-secondary, #c3c2b7);
     --grid: #2c2c2a; --axis: #383835; --land: #c3c2b7;
+    --water: #1d2731; --ground: #222221; --river: #6aa3e3; --road: #cdbca8;
     --ring: rgba(255, 255, 255, 0.10); --wash: rgba(255, 255, 255, 0.06);
     --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
     --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
@@ -48,6 +50,7 @@
   --ink: var(--color-text-primary, #ffffff);
   --ink-2: var(--color-text-secondary, #c3c2b7);
   --grid: #2c2c2a; --axis: #383835; --land: #c3c2b7;
+    --water: #1d2731; --ground: #222221; --river: #6aa3e3; --road: #cdbca8;
   --ring: rgba(255, 255, 255, 0.10); --wash: rgba(255, 255, 255, 0.06);
   --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
   --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
@@ -86,6 +89,9 @@ button { font: inherit; color: inherit; }
 .panel svg:focus-visible { box-shadow: 0 0 0 2px var(--ring); border-radius: 4px; }
 svg text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 svg text.place { fill: var(--ink); font-size: 11px; paint-order: stroke; stroke: var(--surface); stroke-width: 3px; }
+svg text.town { fill: var(--ink-2); font-size: 10px; paint-order: stroke; stroke: var(--surface); stroke-width: 2.5px;
+  stroke-opacity: 0.85; }
+svg text.town.big { fill: var(--ink); font-size: 11px; font-weight: 600; }
 .maps { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 10px 14px; }
 .scale { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); margin-top: 4px;
   font-variant-numeric: tabular-nums; }
@@ -880,17 +886,88 @@ function projection(bounds, width) {
   };
 }
 
-function drawBasemap(svg, p) {
+// The map's own viewport, inside the panel's: an SVG wider than the map shows what's beyond the map's edges,
+// and this clips it.
+function mapFrame(svg, p) {
+  return el("svg", { width: p.width, height: p.height, viewBox: `0 0 ${p.width} ${p.height}` }, svg);
+}
+
+// The basemap in two layers: land and water under the values, lines and towns over them (letting the pointer
+// through to the values).
+function drawGround(svg, p) {
   const map = chart.basemap;
   if (!map) return;
-  const g = el("g", { fill: "none", stroke: "var(--land)", "stroke-linejoin": "round" }, svg);
-  for (const [lines, width, dash] of [[map.coastline, 1, ""], [map.borders, 0.7, "3 2"]]) {
-    for (const coords of lines) {
-      let d = "";
-      for (let i = 0; i < coords.length; i += 2) d += `${i ? "L" : "M"}${p.x(coords[i + 1]).toFixed(1)},${p.y(coords[i]).toFixed(1)}`;
-      el("path", { d, "stroke-width": width, "stroke-opacity": 0.7, ...(dash ? { "stroke-dasharray": dash } : {}) }, g);
-    }
+  const g = el("g", { "pointer-events": "none" }, svg);
+  const [south, west, north, east] = map.bounds;
+  el("rect", { x: p.x(west), y: p.y(north), width: p.x(east) - p.x(west), height: p.y(south) - p.y(north),
+    fill: "var(--water)" }, g);
+  // Land comes in tiles: a stroke in the same colour hides the seams between them.
+  el("path", { d: pathOfRings(map.land, p), fill: "var(--ground)", stroke: "var(--ground)", "stroke-width": 0.6,
+    "fill-rule": "evenodd" }, g);
+  el("path", { d: pathOfRings(map.lake, p), fill: "var(--water)", "fill-rule": "evenodd" }, g);
+}
+
+const MAP_LINES = [
+  ["road", "var(--road)", 0.6, 0.35, ""],
+  ["motorway", "var(--road)", 1.1, 0.5, ""],
+  // Lake shores too, as the values cover the water.
+  ["lake_shore", "var(--river)", 0.7, 0.8, ""],
+  ["river", "var(--river)", 0.7, 0.8, ""],
+  ["river_major", "var(--river)", 1.3, 0.85, ""],
+  ["border", "var(--ink-2)", 0.8, 0.6, "4 2"],
+  ["coastline", "var(--land)", 0.8, 0.7, ""],
+];
+
+function drawMapLines(svg, p) {
+  const map = chart.basemap;
+  if (!map) return;
+  const g = el("g", { fill: "none", "stroke-linejoin": "round", "stroke-linecap": "round", "pointer-events": "none" },
+    svg);
+  for (const [name, color, width, opacity, dash] of MAP_LINES) {
+    if (!map[name] || !map[name].length) continue;
+    el("path", { d: map[name].map((c) => pathOfCoords(c, p)).join(""), stroke: color, "stroke-width": width,
+      "stroke-opacity": opacity, ...(dash ? { "stroke-dasharray": dash } : {}) }, g);
   }
+}
+
+// Town names, largest first, where they don't overlap each other or `taken` (boxes [x0, y0, x1, y1]).
+function drawTowns(svg, p, taken) {
+  const map = chart.basemap;
+  if (!map || !map.places) return;
+  const g = el("g", { "pointer-events": "none" }, svg);
+  const boxes = [...taken];
+  const free = (b) => b[0] >= 2 && b[2] <= p.width - 2 && b[1] >= 2 && b[3] <= p.height - 2
+    && !boxes.some((o) => b[0] < o[2] && b[2] > o[0] && b[1] < o[3] && b[3] > o[1]);
+  // Few enough to stay a background: about one name per 130 × 90 units.
+  let room = Math.max(4, Math.round((p.width * p.height) / 12000));
+  for (const [i, [lat, lon, name]] of map.places.entries()) {
+    if (!room) break;
+    const x = p.x(lon), y = p.y(lat);
+    // The few largest stand out.
+    const big = i < 6;
+    const w = name.length * (big ? 6.8 : 5.6);
+    // Right of the dot, else left of it.
+    const right = [x - 3, y - 7, x + 5 + w, y + 6];
+    const left = [x - 5 - w, y - 7, x + 3, y + 6];
+    const box = free(right) ? right : free(left) ? left : null;
+    if (!box) continue;
+    boxes.push(box);
+    room--;
+    el("circle", { cx: x, cy: y, r: 1.8, fill: "var(--ink-2)", stroke: "var(--surface)", "stroke-width": 0.8 }, g);
+    const text = el("text", { x: box === right ? x + 4 : x - 4, y: y + 3.5, class: big ? "town big" : "town",
+      "text-anchor": box === right ? "start" : "end" }, g);
+    text.textContent = name;
+  }
+}
+
+function pathOfCoords(coords, p) {
+  let d = "";
+  for (let i = 0; i < coords.length; i += 2) d += `${i ? "L" : "M"}${p.x(coords[i + 1]).toFixed(1)},${p.y(coords[i]).toFixed(1)}`;
+  return d;
+}
+
+function pathOfRings(rings, p) {
+  return (rings || []).map((r) => `${pathOfCoords(r, p)}Z`).join("");
 }
 
 // Sequential (one hue, light → dark) for magnitudes; diverging around 0 for values on both sides.
@@ -955,10 +1032,12 @@ function renderMaps(body, f) {
       label.appendChild(document.createTextNode(modelName(model)));
     }
     const p = projection(chart.basemap ? chart.basemap.bounds : boundsOf(f), width);
-    const svg = el("svg", { viewBox: `0 0 ${p.width} ${p.height}`, height: p.height, role: "img",
-      "aria-label": `Map of ${fieldLabel(f)}${model ? ` for ${modelName(model)}` : ""}` }, cell);
+    const svg = mapFrame(el("svg", { viewBox: `0 0 ${p.width} ${p.height}`, height: p.height, role: "img",
+      "aria-label": `Map of ${fieldLabel(f)}${model ? ` for ${modelName(model)}` : ""}` }, cell), p);
+    drawGround(svg, p);
     const layer = el("g", {}, svg);
-    drawBasemap(svg, p);
+    drawMapLines(svg, p);
+    drawTowns(svg, p, f.has("point") ? pointBoxes(f, p) : []);
     const labels = el("g", {}, svg);
     draws.push(() => drawMapLayer(layer, labels, f, model, p, scale));
   }
@@ -970,6 +1049,16 @@ function renderMaps(body, f) {
   const redraw = () => draws.forEach((d) => d());
   if (times && times.length > 1) timeSlider(body, f, times, redraw);
   redraw();
+}
+
+// Where the markers of places and their labels go, which town names keep clear of.
+function pointBoxes(f, p) {
+  const c = f.coords.point;
+  return c.lat.map((lat, i) => {
+    const x = p.x(c.lon[i]), y = p.y(lat);
+    const label = `${c.labels ? `${c.labels[i]} ` : ""}${fmtValue(f, f.data[0])}`;
+    return [x - 9, y - 9, x + 14 + label.length * 6.5, y + 9];
+  });
 }
 
 function boundsOf(f) {
@@ -1069,9 +1158,11 @@ function renderRouteMap(body, coord) {
   const p = projection(bounds, width);
   const panel = html("div", { class: "panel" }, body);
   panel.style.maxWidth = "420px";
-  const svg = el("svg", { viewBox: `0 0 ${p.width} ${p.height}`, role: "img", "aria-label": "Map of the route" },
-    panel);
-  drawBasemap(svg, p);
+  const svg = mapFrame(el("svg", { viewBox: `0 0 ${p.width} ${p.height}`, role: "img",
+    "aria-label": "Map of the route" }, panel), p);
+  drawGround(svg, p);
+  drawMapLines(svg, p);
+  drawTowns(svg, p, []);
   let d = "";
   coord.lat.forEach((lat, i) => { d += `${i ? "L" : "M"}${p.x(coord.lon[i]).toFixed(1)},${p.y(lat).toFixed(1)}`; });
   el("path", { d, fill: "none", stroke: "var(--ink)", "stroke-width": 2.5, "stroke-linejoin": "round" }, svg);
