@@ -228,3 +228,21 @@ def test_throttled_origin_falls_back_to_mirror(tmp_path):
     # The origin is tried once, then skipped while it cools down.
     assert [u for u in fetcher.urls if u.startswith("https://origin.test/")] == [fetcher.urls[0]]
     assert any(u.startswith("https://mirror.test/") and u.endswith(".grib2") for u in fetcher.urls)
+
+
+def test_fallback_download_counts_against_the_budget(tmp_path):
+    class Budget:
+        reserved = []
+
+        def reserve(self, nbytes):
+            self.reserved.append(nbytes)
+
+    budget = Budget()
+    fetcher = Throttled(FakeServer(published_until=60), "https://origin.test/")
+    # Indexes come from the origin; only its GRIB downloads fail.
+    fetcher.get = fetcher.server.get
+    src = EcmwfSource(IFS_ENS, fetcher, FakeDecoder(), FieldStore(tmp_path),
+                      hosts=Mirrors("https://origin.test", ["https://mirror.test"]), budget=budget,
+                      region=Region(45, 0, 55, 15), clock=lambda: RUN + timedelta(hours=8), grid=GRID)
+    result = src.samples(hourly(RUN + timedelta(hours=24), 6), ["precip"])
+    assert budget.reserved == [result.bytes_downloaded] * 2

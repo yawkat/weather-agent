@@ -97,7 +97,8 @@ class EcmwfSource:
         self.fetcher = fetcher
         self.decoder = decoder
         self.store = store
-        self.hosts = hosts or Mirrors("https://data.ecmwf.int/forecasts")  # share one between sources so they skip the same failing hosts
+        # Share one between sources, so they all skip the same failing hosts.
+        self.hosts = hosts or Mirrors("https://data.ecmwf.int/forecasts")
         self.crop: Crop = grid.crop(region)
         self.clock = clock
         self.on_download = on_download
@@ -202,9 +203,11 @@ class EcmwfSource:
             params = sorted({e["_canonical"] for _, wanted in plans.values() for e in wanted})
             log.info("%s run %s: fetching %d step(s) %s, params %s, %.1f MB", self.name, run.strftime("%Y-%m-%d %HZ"),
                      len(plans), step_list(sorted(plans)), ",".join(params), size / 1e6)
-            if self.budget is not None:
-                self.budget.reserve(size)
-            written = sum(self.hosts.download_many(self.fetcher, [download for download, _ in plans.values()]))
+            reserve = None if self.budget is None else lambda: self.budget.reserve(size)
+            if reserve is not None:
+                reserve()
+            # Falling back to another host downloads the batch again, so that is reserved too.
+            written = sum(self.hosts.download_many(self.fetcher, [download for download, _ in plans.values()], reserve))
             for step, (download, wanted) in plans.items():
                 self._store_step(run, step, download.dest, wanted)
         finally:

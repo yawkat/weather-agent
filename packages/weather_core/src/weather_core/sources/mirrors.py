@@ -2,16 +2,17 @@
 
 The origin comes first and is used whenever it works. A host that fails (after the fetcher's own retries, e.g. on
 HTTP 429) is skipped for a while, so a throttled origin isn't hammered by every query. Mirrors copy new runs a few
-minutes after the origin, so a 404 from the origin is final, but one from a mirror may just be lag.
+minutes after the origin, so a 404 from the origin is final, but one from a mirror may just be lag: it isn't held
+against the mirror.
 """
 
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from urllib.parse import urlsplit
 
-from .base import Download, Fetcher, SourceError
+from .base import Download, Fetcher, NotPublished, SourceError
 
 log = logging.getLogger(__name__)
 
@@ -62,13 +63,25 @@ class Mirrors:
             return None
         raise error
 
-    def download_many(self, fetcher: Fetcher, downloads: list[Download]) -> list[int]:
+    def download_many(self, fetcher: Fetcher, downloads: list[Download],
+                      reserve: Callable[[], None] | None = None) -> list[int]:
         """`fetcher.download_many` for downloads whose URLs are relative to the base URLs. If a host fails, the
-        next one fetches the whole batch again (destination files are rewritten from the start)."""
+        next one fetches the whole batch again (destination files are rewritten from the start), after `reserve`
+        accounts for the repeat; it raises to stop. Callers only ask for files an index listed, so after a
+        mirror's 404 (lag) every other host is tried, including ones cooling down."""
         error: Exception | None = None
-        for base, _ in self._order():
+        for attempt, (base, _) in enumerate(self._order()):
+            if attempt and reserve is not None:
+                try:
+                    reserve()
+                except SourceError as e:
+                    raise e from error
             try:
                 return fetcher.download_many([replace(d, url=f"{base}/{d.url}") for d in downloads])
+            except NotPublished as e:
+                if base == self.origin:
+                    raise
+                error = e
             except SourceError as e:
                 self._failed(base, e)
                 error = e
