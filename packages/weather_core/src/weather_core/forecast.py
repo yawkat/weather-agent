@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 from .budget import DownloadBudget
+from .chart import check_type, encode_chart
 from .expr import runtime as rt
 from .expr.axes import BOOL, LABEL, LAT, LON, POINT, RECORD, ExprError, Type
 from .expr.language import Demand, Env, Location, Sizes, compile_query, parse
@@ -122,10 +123,20 @@ class Forecaster:
     def forecast(self, text: str, gpx: str | None = None) -> dict:
         """Answer a forecast query (weather_core.expr). Locations, times and models are part of the query; `gpx` is
         a GPX document the query can refer to as route(gpx, …)."""
+        return self._answer(text, gpx, chart=False)[0]
+
+    def visualize(self, text: str, gpx: str | None = None) -> tuple[dict, dict]:
+        """Answer a query for display: the answer as `forecast` gives it (a summary instead of the table if that
+        would be too long) and every value as a chart (weather_core.chart)."""
+        return self._answer(text, gpx, chart=True)
+
+    def _answer(self, text: str, gpx: str | None, chart: bool) -> tuple[dict, dict | None]:
         program = parse(text)
         env = Env(tuple(s.name for s in self.sources), {s.name: s.provides() for s in self.sources},
                   self.default_tz, gpx is not None)
         compiled = compile_query(program, env)
+        if chart:
+            check_type(compiled.result.type)  # before downloading anything
         resolved = {loc: self._resolve(loc, demand, gpx) for loc, demand in compiled.demands.items()}
         for r in resolved.values():
             cells = len(r.time) * math.prod(len(c) for c in r.space.values()) * ASSUMED_MEMBERS * len(r.sources)
@@ -180,7 +191,13 @@ class Forecaster:
             ctx = rt.Context(self.default_tz, self.eval_bytes, time.monotonic() + self.eval_timeout_s)
             ctx.locations = locations
             value = compiled.evaluate(ctx)
-            result = rt.encode(value, compiled.result.type, ctx, self.max_rows)
+            drawn = encode_chart(value, compiled.result.type, ctx) if chart else None
+            try:
+                result = rt.encode(value, compiled.result.type, ctx, self.max_rows)
+            except rt.TooManyRows:
+                if not chart:
+                    raise
+                result = _summary(value, compiled.result.type)  # the chart has every value
         answer = {
             "result": result,
             "units": _units(compiled.result.type),
@@ -193,7 +210,11 @@ class Forecaster:
         summaries = [r.summary for r in resolved.values() if r.summary]
         if summaries:
             answer["locations"] = summaries
-        return answer
+        if drawn is not None:
+            drawn["models"] = answer["models"]
+            drawn["attribution"] = attribution
+            drawn["warnings"] = answer["warnings"]
+        return answer, drawn
 
     # -- internals -----------------------------------------------------------------------------------------------
 
@@ -315,6 +336,21 @@ class Forecaster:
     @staticmethod
     def _format(t: datetime, tz: tzinfo) -> str:
         return t.astimezone(tz).isoformat(timespec="minutes")
+
+
+def _summary(value, typ: Type) -> dict:
+    """Instead of a table that would be too long: each value's dimensions and range."""
+    types = dict(typ.fields) if isinstance(value, rt.Rec) else {None: typ}
+    fields = value.fields.items() if isinstance(value, rt.Rec) else [(None, value)]
+    out = {}
+    for name, v in fields:
+        finite = v.data[np.isfinite(v.data)]
+        entry = {"dims": {d: len(v.coords[d]) for d in v.dims}}
+        if finite.size and types[name].kind != LABEL:  # labels are indices: no meaningful range
+            entry |= {"min": round(float(finite.min()), 3), "mean": round(float(finite.mean()), 3),
+                      "max": round(float(finite.max()), 3)}
+        out[name or "value"] = entry
+    return {"too_long_for_a_table": out}
 
 
 def _units(t: Type):

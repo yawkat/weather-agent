@@ -1,89 +1,77 @@
 """Tools with an interactive view in the client (MCP Apps); the protocol side is at.yawk.weatheragent.McpApps."""
 
 import json
-import math
 
 from at.yawk.weatheragent import McpApps, McpAppTool
 from jakarta.inject import Singleton
 from micronaut.mcp.annotations import Resource
 
 from .forecast_service import ForecastService
-from .tools import _run, _sources
+from .tools import _run
 
-METEOGRAM_URI = "ui://weather-agent/meteogram.html"
+VIEW_URI = "ui://weather-agent/forecast.html"
 
-METEOGRAM_DESCRIPTION = (
-    "Show the user an interactive meteogram for one point: every ensemble member's time series per model, with "
-    "percentile bands, for temperature, precipitation, wind and more. Use it when the user wants to see the "
-    "forecast rather than only hear about it. The chart is displayed to the user; you get a daily summary per "
-    "model (member percentiles) to talk about. Models end where their run ends, or earlier when the download "
-    "budget doesn't stretch further (see until/until_reason); long windows are expensive for the DWD models. Use "
-    "resolve_place to get coordinates.")
+DESCRIPTION = (
+    "Show the user a forecast query's answer as an interactive chart, next to the answer you get. The query is the "
+    "same as for the forecast tool; the dimensions left in the answer pick the chart: time (or hour, distance "
+    "bins) gives a graph, lat × lon (an area from .sel(lat=slice(…), lon=slice(…))) a map, over time a map with "
+    "a time slider, point (places) markers on a map or one line per place. model becomes colours, member thin "
+    "lines (one per member), quantile bands. Keep what the user should see: e.g. "
+    "forecast().interp(lat=50.94, lon=6.96).sel(time=slice('2026-10-10', '2026-10-13')).t2m for every member "
+    "of every model (a meteogram), or (….precip.sum('time') > 10).mean('member') over an area for a map of the "
+    "chance of heavy rain. Maps can't show every member: reduce member first. Up to 400,000 values; the "
+    "table you get is replaced by a per-value summary when it would be longer than 500 rows. Read "
+    "weather_query_help first.")
 
-METEOGRAM_SCHEMA = json.dumps({
+SCHEMA = json.dumps({
     "type": "object",
     "properties": {
-        "lat": {"type": "number", "description": "Latitude"},
-        "lon": {"type": "number", "description": "Longitude"},
-        "label": {"type": "string", "description": "Place name for the chart title, e.g. 'Bonn'"},
-        "start": {"type": "string", "description": "Start, ISO 8601 local time (Europe/Berlin unless an offset "
-                                                   "is given), e.g. 2026-10-10T06:00; default: now"},
-        "end": {"type": "string", "description": "End, ISO 8601 local time; default: start + 3 days"},
-        "variables": {"type": "string", "description": "Comma-separated, at most 6 (default: t2m,precip,wind,"
-                                                       "gust,cloud); see weather_query_help for the list"},
-        "sources": {"type": "string", "description": "Comma-separated model names to restrict to (default: all)"},
+        "query": {"type": "string", "description": "The query; see weather_query_help"},
+        "title": {"type": "string", "description": "Chart title for the user, e.g. 'Rain risk around Cologne, "
+                                                   "Saturday'"},
+        "gpx": {"type": "string", "description": "Optional GPX document; the query refers to it as route(gpx, …)"},
     },
-    "required": ["lat", "lon"],
+    "required": ["query"],
 })
+
+MAX_TITLE = 120
 
 
 @Singleton
-class MeteogramApp(McpAppTool):
+class ForecastView(McpAppTool):
     def __init__(self, service: ForecastService):
         self.forecaster = service.forecaster
 
     def name(self) -> str:
-        return "show_meteogram"
+        return "show_forecast"
 
     def title(self) -> str:
-        return "Meteogram"
+        return "Forecast chart"
 
     def description(self) -> str:
-        return METEOGRAM_DESCRIPTION
+        return DESCRIPTION
 
     def inputSchema(self) -> str:
-        return METEOGRAM_SCHEMA
+        return SCHEMA
 
     def viewUri(self) -> str:
-        return METEOGRAM_URI
+        return VIEW_URI
 
     def call(self, arguments: str) -> str:
         def run() -> dict:
             args = json.loads(arguments)
-            summary, chart = self.forecaster.meteogram(
-                _number(args, "lat"), _number(args, "lon"), start=_text(args, "start"), end=_text(args, "end"),
-                variables=_text(args, "variables"), sources=_sources(_text(args, "sources")),
-                label=_text(args, "label"))
-            summary = {"display": "The user sees an interactive chart of every member; this is its summary.",
-                       **summary}
-            return {"text": json.dumps(summary, ensure_ascii=False), "structuredContent": chart}
+            query, title, gpx = (args.get(k) for k in ("query", "title", "gpx"))
+            if not isinstance(query, str) or not isinstance(title, (str, type(None))) \
+                    or not isinstance(gpx, (str, type(None))):
+                raise ValueError("query, title and gpx must be strings")
+            answer, chart = self.forecaster.visualize(query, gpx=gpx)
+            chart["title"] = " ".join((title or "").split())[:MAX_TITLE]
+            chart["query"] = query
+            answer = {"display": "The user sees this answer as an interactive chart.", **answer}
+            return {"text": json.dumps(answer, ensure_ascii=False), "structuredContent": chart}
         return _run(run)
 
-    @Resource(uri="ui://weather-agent/meteogram.html", name="meteogram", title="Meteogram",
+    @Resource(uri="ui://weather-agent/forecast.html", name="forecast-chart", title="Forecast chart",
               mimeType="text/html;profile=mcp-app")
-    def meteogram_view(self) -> str:
-        return McpApps.view("mcp-apps/meteogram.html")
-
-
-def _number(args: dict, name: str) -> float:
-    value = args.get(name)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        raise ValueError(f"{name} must be a number")
-    return float(value)
-
-
-def _text(args: dict, name: str) -> str | None:
-    value = args.get(name)
-    if value is not None and not isinstance(value, str):
-        raise ValueError(f"{name} must be a string")
-    return value or None
+    def view(self) -> str:
+        return McpApps.view("mcp-apps/forecast.html")

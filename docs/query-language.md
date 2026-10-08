@@ -152,8 +152,24 @@ state variables the warning points to the mean or a threshold.
 - A dict of arrays: one table if they share dimensions, else one entry per key.
 - Every answer carries the model table (run, lead hours, members), units, warnings and attribution.
 
-A visualization (later) renders the same result: one remaining `time` dimension is a graph, one `point`
-dimension (from `area`) is a map. The agent writes the query; the view only picks colours.
+## Charts
+
+The `show_forecast` tool takes the same query and shows its answer to the user as an interactive chart (an MCP
+Apps view, `config/mcp-apps/forecast.html`), next to the answer the agent gets. The answer is sent as dense arrays
+(`weather_core/chart.py`, at most 400,000 values) and the dimensions left in each value pick the drawing:
+
+| Dimensions left | Drawing |
+|---|---|
+| `time`, `hour` or `distance_km_bins` | a graph along that axis; on a route, also the route on a map |
+| `lat` × `lon` | a map of grid cells; with `time`, a time slider |
+| `point` without an x axis | markers on a map |
+| none of these | dots and ranges per model, or a single number |
+
+Within those, `model` is colour (or one map per model), `member` thin lines (with the 10–90 % band and median the
+view draws for orientation), `quantile` bands, and `point` with an x axis one graph per place. Maps can't show
+every member: the query must reduce `member` first. Coastlines and borders come from Natural Earth (public
+domain), clipped around the map (`scripts/make_basemap.py`). The agent writes the query; the view only picks
+colours.
 
 ## Examples
 
@@ -247,4 +263,5 @@ ok.mean(["model", "member"])
 2. **Time strings.** Local time (Europe/Berlin unless an offset is given) as today; relative forms like
    `"tomorrow 10:00"` would be convenient but are a second date language.
 3. **How strict.** Should anything be an error rather than a warning (e.g. unit mismatches)?
-4. **Output size.** 500 rows is fine for an agent; maps need more, through a separate visualization path.
+4. **Output size.** 500 rows is fine for an agent; charts (`show_forecast`) take up to 400,000 values, and the
+   agent then gets a per-value summary instead of the table.

@@ -65,33 +65,41 @@ def test_fetcher_timeout(my_context):
         socket.close()
 
 
-def test_mcp_path_without_key(my_context):
-    """No key in the test config: MCP answers at /mcp (through the /mcp{/key} route) and nothing below it."""
+def _post(context, path, body):
+    """POST a JSON body to the running server; the java.net.http response."""
     import java
 
     from micronaut.runtime.server import EmbeddedServer
 
-    server = my_context.getBean(EmbeddedServer)
+    server = context.getBean(EmbeddedServer)
     if not server.isRunning():
         server.start()
-    HttpClient = java.type("java.net.http.HttpClient")
     HttpRequest = java.type("java.net.http.HttpRequest")
-    URI = java.type("java.net.URI")
-    client = HttpClient.newHttpClient()
+    request = (HttpRequest.newBuilder(java.type("java.net.URI").create(f"http://localhost:{server.getPort()}{path}"))
+               .header("Content-Type", "application/json")
+               .header("Accept", "application/json, text/event-stream")
+               .POST(HttpRequest.BodyPublishers.ofString(body)).build())
+    return java.type("java.net.http.HttpClient").newHttpClient().send(
+        request, java.type("java.net.http.HttpResponse").BodyHandlers.ofString())
+
+
+def _mcp(context, method, params):
+    """One JSON-RPC request to /mcp; its result."""
+    import json
+
+    response = _post(context, "/mcp", json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
+    assert response.statusCode() == 200, response.body()
+    return json.loads(str(response.body()))["result"]
+
+
+def test_mcp_path_without_key(my_context):
+    """No key in the test config: MCP answers at /mcp (through the /mcp{/key} route) and nothing below it."""
     body = '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-
-    def post(path):
-        request = (HttpRequest.newBuilder(URI.create(f"http://localhost:{server.getPort()}{path}"))
-                   .header("Content-Type", "application/json")
-                   .header("Accept", "application/json, text/event-stream")
-                   .POST(HttpRequest.BodyPublishers.ofString(body)).build())
-        return client.send(request, java.type("java.net.http.HttpResponse").BodyHandlers.ofString())
-
-    response = post("/mcp")
+    response = _post(my_context, "/mcp", body)
     assert response.statusCode() == 200, response.body()
     assert "forecast" in response.body()
     assert "weather_query_help" in response.body()
-    assert post("/mcp/" + "k" * 40).statusCode() == 404
+    assert _post(my_context, "/mcp/" + "k" * 40, body).statusCode() == 404
 
 
 def test_bad_access_key_stops_startup():
@@ -103,3 +111,48 @@ def test_bad_access_key_stops_startup():
     properties.put("weather.access-key", "too-short")
     with pytest.raises(BaseException, match="access key must be"):
         ApplicationContext.builder().environments("test").properties(properties).start().close()
+
+
+def test_chart_tool_links_its_view(my_context):
+    tools = {t["name"]: t for t in _mcp(my_context, "tools/list", {})["tools"]}
+    uri = tools["show_forecast"]["_meta"]["ui"]["resourceUri"]
+    assert uri == "ui://weather-agent/forecast.html"
+    assert tools["show_forecast"]["inputSchema"]["required"] == ["query"]
+    assert "forecast" in tools  # annotated tools are still there
+
+    contents = _mcp(my_context, "resources/read", {"uri": uri})["contents"][0]
+    assert contents["mimeType"] == "text/html;profile=mcp-app"
+    assert "ui/initialize" in contents["text"]
+
+
+def test_chart_tool_returns_answer_and_chart(my_context):
+    import json
+
+    from weather_agent.forecast_service import ForecastService
+
+    forecaster = my_context.getBean(ForecastService).forecaster
+    calls = []
+
+    def visualize(query, gpx=None):
+        calls.append((query, gpx))
+        return {"result": 0.5, "models": []}, {"fields": [{"name": None, "dims": [], "data": [0.5]}]}
+
+    forecaster.visualize = visualize
+    try:
+        result = _mcp(my_context, "tools/call", {"name": "show_forecast",
+                                                 "arguments": {"query": "q", "title": "  Rain \n risk "}})
+        assert not result["isError"]
+        assert json.loads(result["content"][0]["text"])["result"] == 0.5
+        assert result["structuredContent"]["fields"][0]["data"] == [0.5]
+        assert result["structuredContent"]["title"] == "Rain risk"
+        assert result["structuredContent"]["query"] == "q"
+        assert calls == [("q", None)]
+
+        def failing(query, gpx=None):
+            raise ValueError("select a time range")
+
+        forecaster.visualize = failing
+        error = _mcp(my_context, "tools/call", {"name": "show_forecast", "arguments": {"query": "q"}})
+        assert error["isError"] and error["content"][0]["text"] == "select a time range"
+    finally:
+        del forecaster.visualize

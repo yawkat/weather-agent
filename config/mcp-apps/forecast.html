@@ -1,0 +1,1228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forecast chart</title>
+<!--
+  MCP Apps view for the show_forecast tool. The host renders it in a sandboxed frame and talks JSON-RPC over
+  postMessage: ui/initialize, then the tool's arguments (tool-input) and result (tool-result). Self-contained:
+  the default MCP Apps CSP allows no external scripts, styles, images or fetches.
+
+  The result (weather_core.chart) is a list of fields, each a dense array with named dimensions. The dimensions
+  pick the drawing: time / hour / distance bins → graph; lat × lon → map (time → slider); point without an x
+  axis → markers on a map; anything else → dots and ranges per model. model → colour, member → thin lines,
+  quantile → bands. The view never reduces data itself: what it shows is what the query asked for.
+-->
+<style>
+:root {
+  color-scheme: light;
+  --surface: var(--color-background-primary, #fcfcfb);
+  --ink: var(--color-text-primary, #0b0b0b);
+  --ink-2: var(--color-text-secondary, #52514e);
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --land: #52514e;
+  --ring: rgba(11, 11, 11, 0.10);
+  --wash: rgba(11, 11, 11, 0.05);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+  --s5: #e87ba4; --s6: #008300; --s7: #4a3aa7; --s8: #e34948;
+  --font: var(--font-sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface: var(--color-background-primary, #1a1a19);
+    --ink: var(--color-text-primary, #ffffff);
+    --ink-2: var(--color-text-secondary, #c3c2b7);
+    --grid: #2c2c2a; --axis: #383835; --land: #c3c2b7;
+    --ring: rgba(255, 255, 255, 0.10); --wash: rgba(255, 255, 255, 0.06);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface: var(--color-background-primary, #1a1a19);
+  --ink: var(--color-text-primary, #ffffff);
+  --ink-2: var(--color-text-secondary, #c3c2b7);
+  --grid: #2c2c2a; --axis: #383835; --land: #c3c2b7;
+  --ring: rgba(255, 255, 255, 0.10); --wash: rgba(255, 255, 255, 0.06);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--surface); color: var(--ink); font: 14px/1.4 var(--font); }
+#app { position: relative; padding: 12px 16px 16px; }
+header { display: flex; align-items: flex-start; gap: 8px; }
+header .titles { flex: 1; min-width: 0; }
+h1 { font-size: 16px; font-weight: 600; margin: 0; overflow-wrap: anywhere; }
+h2 { font-size: 13px; font-weight: 600; margin: 14px 0 2px; }
+.sub { color: var(--ink-2); font-size: 12px; margin: 2px 0 0; }
+button { font: inherit; color: inherit; }
+#fullscreen { border: 1px solid var(--ring); background: transparent; border-radius: 6px; padding: 4px 8px;
+  font-size: 12px; cursor: pointer; }
+#fullscreen:hover { background: var(--wash); }
+.chips { display: flex; gap: 6px; overflow-x: auto; margin: 10px -16px 2px; padding: 0 16px 4px;
+  scrollbar-width: none; }
+.chips::-webkit-scrollbar { display: none; }
+.chip { flex: none; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--ring);
+  background: transparent; border-radius: 999px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+  white-space: nowrap; }
+.chip:hover { background: var(--wash); }
+.chip[aria-pressed="true"] { border-color: var(--ink); font-weight: 600; }
+.key { display: inline-block; width: 14px; height: 2px; border-radius: 1px; background: currentColor; flex: none; }
+.key.band { height: 8px; opacity: 0.25; border-radius: 2px; }
+.key.thin { height: 1px; opacity: 0.5; }
+.key.dot { width: 8px; height: 8px; border-radius: 50%; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--ink-2); font-size: 12px; margin: 6px 0 2px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.panel { margin-top: 10px; }
+.panel-head { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--ink-2); }
+.panel-head b { color: var(--ink); font-weight: 600; }
+.panel svg { display: block; width: 100%; touch-action: pan-y; outline: none; }
+.panel svg:focus-visible { box-shadow: 0 0 0 2px var(--ring); border-radius: 4px; }
+svg text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+svg text.place { fill: var(--ink); font-size: 11px; paint-order: stroke; stroke: var(--surface); stroke-width: 3px; }
+.maps { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 10px 14px; }
+.scale { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); margin-top: 4px;
+  font-variant-numeric: tabular-nums; }
+.scale .bar { flex: 1; max-width: 240px; height: 8px; border-radius: 2px; }
+.slider { display: flex; align-items: center; gap: 10px; margin: 10px 0 0; font-size: 12px; }
+.slider input { flex: 1; min-width: 0; }
+.slider output { min-width: 9em; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.slider button { border: 1px solid var(--ring); background: transparent; border-radius: 6px; padding: 2px 8px;
+  cursor: pointer; }
+.stat { font-size: 28px; font-weight: 600; margin: 8px 0 0; font-variant-numeric: tabular-nums; }
+#tooltip { position: absolute; z-index: 2; pointer-events: none; display: none; min-width: 140px; max-width: 320px;
+  background: var(--surface); border: 1px solid var(--ring); border-radius: 8px; padding: 6px 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); font-size: 12px; }
+#tooltip .when { color: var(--ink-2); margin-bottom: 4px; }
+#tooltip .row { display: flex; align-items: baseline; gap: 6px; }
+#tooltip .row .key { align-self: center; }
+#tooltip .row strong { font-variant-numeric: tabular-nums; white-space: nowrap; }
+#tooltip .row .range { color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+#tooltip .row .what { color: var(--ink-2); margin-left: auto; padding-left: 8px; white-space: nowrap; }
+#notes { margin-top: 12px; font-size: 12px; color: var(--ink-2); }
+#notes p { margin: 2px 0; }
+#warnings p { margin: 8px 0 0; font-size: 12px; color: var(--ink); }
+#warnings p::before { content: "⚠ "; }
+details { margin-top: 10px; font-size: 12px; }
+summary { cursor: pointer; color: var(--ink-2); }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; color: var(--ink-2); margin: 6px 0 0; }
+.table-scroll { overflow-x: auto; max-height: 320px; margin-top: 6px; }
+table { border-collapse: collapse; font-variant-numeric: tabular-nums; white-space: nowrap; }
+th, td { padding: 2px 10px 2px 0; text-align: right; border-bottom: 1px solid var(--grid); }
+th:first-child, td:first-child { text-align: left; }
+th { position: sticky; top: 0; background: var(--surface); font-weight: 600; }
+footer { margin-top: 12px; font-size: 11px; color: var(--muted); }
+footer p { margin: 2px 0; }
+#status { color: var(--ink-2); padding: 24px 0; white-space: pre-wrap; }
+#status.error { color: var(--ink); }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="titles">
+      <h1 id="title">Forecast</h1>
+      <p class="sub" id="subtitle"></p>
+    </div>
+    <button id="fullscreen" type="button" hidden>Expand</button>
+  </header>
+  <div id="status">Waiting for the forecast…</div>
+  <div id="content" hidden>
+    <div id="warnings"></div>
+    <nav class="chips" id="models" aria-label="Model"></nav>
+    <div id="body"></div>
+    <details id="table-wrap"><summary>Table</summary><div class="table-scroll" id="table"></div></details>
+    <details><summary>Query</summary><pre id="query"></pre></details>
+    <div id="notes"></div>
+    <footer id="attribution"></footer>
+  </div>
+  <div id="tooltip" role="status" aria-live="polite"></div>
+</div>
+<script>
+"use strict";
+
+// ---- protocol ---------------------------------------------------------------------------------------------
+
+const PROTOCOL_VERSION = "2026-01-26";
+const APP_INFO = { name: "weather-agent-forecast-chart", version: "0.1.0" };
+let nextId = 1;
+const pending = new Map();
+let hostContext = {};
+
+function post(message) {
+  window.parent.postMessage({ jsonrpc: "2.0", ...message }, "*");
+}
+
+function request(method, params) {
+  const id = nextId++;
+  post({ id, method, params });
+  return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+}
+
+function notify(method, params) {
+  post({ method, params });
+}
+
+window.addEventListener("message", (event) => {
+  if (event.source !== window.parent) return;
+  const m = event.data;
+  if (!m || m.jsonrpc !== "2.0") return;
+  if (m.method === undefined && m.id !== undefined) {
+    const p = pending.get(m.id);
+    if (!p) return;
+    pending.delete(m.id);
+    if (m.error) p.reject(m.error); else p.resolve(m.result);
+    return;
+  }
+  const params = m.params || {};
+  switch (m.method) {
+    case "ui/notifications/tool-input":
+    case "ui/notifications/tool-input-partial":
+      showLoading(params.arguments || {});
+      break;
+    case "ui/notifications/tool-result":
+      showResult(params);
+      break;
+    case "ui/notifications/tool-cancelled":
+      showStatus("The forecast request was cancelled.", false);
+      break;
+    case "ui/notifications/host-context-changed":
+      applyContext({ ...hostContext, ...params });
+      break;
+    case "ui/resource-teardown":
+    case "ping":
+      if (m.id !== undefined) post({ id: m.id, result: {} });
+      break;
+    default:
+      if (m.id !== undefined) post({ id: m.id, error: { code: -32601, message: "Method not found" } });
+  }
+});
+
+function applyContext(context) {
+  hostContext = context || {};
+  const root = document.documentElement;
+  if (hostContext.theme === "light" || hostContext.theme === "dark") root.dataset.theme = hostContext.theme;
+  const variables = (hostContext.styles && hostContext.styles.variables) || {};
+  for (const [name, value] of Object.entries(variables)) {
+    if (name.startsWith("--") && typeof value === "string") root.style.setProperty(name, value);
+  }
+  const fonts = hostContext.styles && hostContext.styles.css && hostContext.styles.css.fonts;
+  if (typeof fonts === "string" && !document.getElementById("host-fonts")) {
+    const style = document.createElement("style");
+    style.id = "host-fonts";
+    style.textContent = fonts;
+    document.head.appendChild(style);
+  }
+  const insets = hostContext.safeAreaInsets;
+  if (insets) {
+    const app = document.getElementById("app");
+    app.style.paddingLeft = `${16 + (insets.left || 0)}px`;
+    app.style.paddingRight = `${16 + (insets.right || 0)}px`;
+    app.style.paddingBottom = `${16 + (insets.bottom || 0)}px`;
+  }
+  const modes = hostContext.availableDisplayModes || [];
+  const button = document.getElementById("fullscreen");
+  button.hidden = !modes.includes("fullscreen");
+  button.textContent = hostContext.displayMode === "fullscreen" ? "Close" : "Expand";
+  if (chart) render();
+}
+
+document.getElementById("fullscreen").addEventListener("click", () => {
+  const mode = hostContext.displayMode === "fullscreen" ? "inline" : "fullscreen";
+  request("ui/request-display-mode", { mode }).then((result) => {
+    applyContext({ ...hostContext, displayMode: (result && result.mode) || mode });
+  }).catch(() => {});
+});
+
+new ResizeObserver(() => {
+  const el = document.documentElement;
+  notify("ui/notifications/size-changed", { width: el.scrollWidth, height: el.scrollHeight });
+}).observe(document.body);
+
+request("ui/initialize", {
+  protocolVersion: PROTOCOL_VERSION,
+  appInfo: APP_INFO,
+  clientInfo: APP_INFO,
+  capabilities: {},
+  appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+}).then((result) => {
+  applyContext((result && result.hostContext) || {});
+  notify("ui/notifications/initialized", {});
+}).catch(() => {});
+
+// ---- data -------------------------------------------------------------------------------------------------
+
+// Colour follows the model, never its position in this result: fixed slots in this order, then the rest.
+const MODEL_ORDER = ["ecmwf-ens", "ecmwf-aifs-ens", "icon-eu-eps", "icon-d2-eps", "icon-d2-ruc-eps"];
+const X_DIMS = ["time", "hour", "distance_km_bins"];
+const SVG = "http://www.w3.org/2000/svg";
+
+let chart = null;
+let fields = [];
+let modelIds = [];
+let selectedModel = null; // null: all models
+let playing = null; // the time slider's timer; maps keep their own time and quantile in field.view
+
+function showStatus(text, error) {
+  const status = document.getElementById("status");
+  status.textContent = text;
+  status.classList.toggle("error", !!error);
+  status.hidden = false;
+  document.getElementById("content").hidden = true;
+}
+
+function showLoading(args) {
+  if (chart) return;
+  if (args.title) document.getElementById("title").textContent = args.title;
+  showStatus("Loading the ensemble forecast… the first request for a place or area can take a few minutes.");
+}
+
+function showResult(result) {
+  const c = result.structuredContent;
+  if (result.isError || !c || !Array.isArray(c.fields)) {
+    const text = (result.content || []).map((x) => x.text || "").join("\n").trim();
+    showStatus(text || "The forecast could not be loaded.", true);
+    return;
+  }
+  chart = c;
+  fields = c.fields.map(prepareField);
+  const present = new Set(fields.flatMap((f) => (f.coords.model ? f.coords.model.labels : [])));
+  const known = MODEL_ORDER.filter((id) => present.has(id));
+  modelIds = [...known, ...[...present].filter((id) => !MODEL_ORDER.includes(id)).sort()];
+  if (selectedModel !== null && !present.has(selectedModel)) selectedModel = null;
+  stopPlaying();
+  document.getElementById("status").hidden = true;
+  document.getElementById("content").hidden = false;
+  render();
+}
+
+function colorOf(model) {
+  if (model === undefined) return "var(--s1)";
+  const i = MODEL_ORDER.includes(model) ? MODEL_ORDER.indexOf(model)
+    : MODEL_ORDER.length + modelIds.filter((id) => !MODEL_ORDER.includes(id)).indexOf(model);
+  return `var(--s${Math.min(i, 7) + 1})`;
+}
+
+function modelName(id) {
+  const m = (chart.models || []).find((x) => x.model === id);
+  return m ? m.name : id;
+}
+
+// A field: dims, coords, flat row-major data; at(index by dim name) reads one value.
+function prepareField(f) {
+  const sizes = f.dims.map((d) => coordSize(d, f.coords[d]));
+  const strides = sizes.map((_, i) => sizes.slice(i + 1).reduce((a, b) => a * b, 1));
+  const values = f.data.filter((v) => v !== null);
+  // Conditions left unreduced are yes/no; unitless numbers within 0…1 (a condition's mean) are probabilities.
+  const yesno = f.kind === "condition";
+  const percent = !yesno && f.unit === "" && values.length > 0 && values.every((v) => v >= 0 && v <= 1);
+  return {
+    ...f, sizes, strides, percent, yesno,
+    view: { timeIndex: 0, quantile: null },
+    has: (d) => f.dims.includes(d),
+    size: (d) => sizes[f.dims.indexOf(d)] || 1,
+    at(index) {
+      let k = 0;
+      for (let i = 0; i < f.dims.length; i++) k += (index[f.dims[i]] || 0) * strides[i];
+      return f.data[k];
+    },
+  };
+}
+
+function coordSize(dim, c) {
+  if (dim === "time") return c.minutes.length;
+  if (dim === "point") return c.lat.length;
+  return (c.values || c.labels).length;
+}
+
+function modelIndex(f, model) {
+  return f.coords.model ? f.coords.model.labels.indexOf(model) : -1;
+}
+
+// [min, max] of the non-null values, or null; a loop, as spreading 100k+ values into Math.min overflows the stack.
+function extent(values) {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const v of values) {
+    if (v === null || v === undefined) continue;
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  return lo <= hi ? [lo, hi] : null;
+}
+
+function quantile(sorted, p) {
+  if (!sorted.length) return null;
+  const pos = (sorted.length - 1) * p;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
+// ---- formatting -------------------------------------------------------------------------------------------
+
+const formatters = new Map();
+
+function formatter(options) {
+  const key = JSON.stringify(options);
+  if (!formatters.has(key)) {
+    let f;
+    try {
+      f = new Intl.DateTimeFormat(hostContext.locale || undefined, { ...options, timeZone: chart.timezone || "UTC" });
+    } catch (e) {
+      f = new Intl.DateTimeFormat(undefined, { ...options, timeZone: "UTC" });
+    }
+    formatters.set(key, f);
+  }
+  return formatters.get(key);
+}
+
+const date = (minutes) => new Date(minutes * 60000);
+const fmtDay = (m) => formatter({ weekday: "short", day: "numeric" }).format(date(m));
+const fmtDate = (m) => formatter({ weekday: "short", day: "numeric", month: "short" }).format(date(m));
+const fmtWhen = (m) => formatter({ weekday: "short", day: "numeric", month: "short", hour: "2-digit",
+  minute: "2-digit", hourCycle: "h23" }).format(date(m));
+
+function hourOf(m) {
+  const parts = formatter({ hour: "numeric", hourCycle: "h23" }).formatToParts(date(m));
+  return Number((parts.find((p) => p.type === "hour") || {}).value);
+}
+
+function stepMinutes(step) {
+  const match = /^(\d*)([hD])$/.exec(step || "");
+  if (!match) return 0;
+  return (Number(match[1] || 1)) * (match[2] === "D" ? 1440 : 60);
+}
+
+function fmtValue(f, v) {
+  if (v === null || v === undefined) return "–";
+  if (f.yesno) return v >= 0.5 ? "yes" : "no";
+  if (f.percent) return `${Math.round(v * 100)} %`;
+  const a = Math.abs(v);
+  const digits = a >= 100 ? 0 : a >= 10 ? 1 : a >= 1 ? 1 : 2;
+  return `${v.toFixed(digits)}${f.unit ? ` ${f.unit}` : ""}`;
+}
+
+function fmtTick(f, v) {
+  if (f.yesno) return v === 1 ? "yes" : v === 0 ? "no" : "";
+  if (f.percent) return `${Math.round(v * 100)}%`;
+  return String(+v.toFixed(6));
+}
+
+function fieldLabel(f) {
+  return f.name || (chart.fields.length === 1 ? (chart.title ? "" : "Value") : "value");
+}
+
+function quantileLabel(q) {
+  return `${+(q * 100).toFixed(1)} %`;
+}
+
+// ---- layout -----------------------------------------------------------------------------------------------
+
+function el(tag, attrs, parent) {
+  const node = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
+  if (parent) parent.appendChild(node);
+  return node;
+}
+
+function html(tag, attrs, parent, text) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
+  if (text !== undefined) node.textContent = text;
+  if (parent) parent.appendChild(node);
+  return node;
+}
+
+function chip(parent, label, pressed, onClick, color) {
+  const button = html("button", { type: "button", class: "chip", "aria-pressed": String(pressed) }, parent);
+  if (color) {
+    const key = html("span", { class: "key" }, button);
+    key.style.color = color;
+  }
+  button.appendChild(document.createTextNode(label));
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function legendItem(parent, color, cls, text) {
+  const item = html("span", {}, parent);
+  const key = html("span", { class: `key ${cls}` }, item);
+  key.style.color = color;
+  item.appendChild(document.createTextNode(text));
+}
+
+function kindOf(f) {
+  if (f.has("lat") && f.has("lon")) return "grid";
+  const x = X_DIMS.find((d) => f.has(d));
+  if (x) return "graph";
+  if (f.has("point") && !f.has("member")) return "points";
+  return "dots";
+}
+
+function render() {
+  formatters.clear();
+  hideTooltip();
+  stopPlaying(); // its slider is rebuilt below
+  const title = chart.title || (fields.length === 1 && fields[0].name) || "Forecast";
+  document.getElementById("title").textContent = title;
+  document.getElementById("subtitle").textContent = subtitle();
+  renderWarnings();
+  renderModelChips();
+  const body = document.getElementById("body");
+  body.replaceChildren();
+  const graphs = fields.filter((f) => kindOf(f) === "graph");
+  if (graphs.length) renderGraphs(body, graphs);
+  for (const f of fields.filter((x) => kindOf(x) === "grid" || kindOf(x) === "points")) renderMaps(body, f);
+  for (const f of fields.filter((x) => kindOf(x) === "dots")) renderDots(body, f);
+  renderTable();
+  document.getElementById("query").textContent = chart.query || "";
+  renderNotes();
+  renderAttribution();
+}
+
+function subtitle() {
+  const times = fields.flatMap((f) => (f.coords.time ? f.coords.time.minutes : []));
+  if (!times.length) return chart.timezone || "";
+  const [a, b] = extent(times);
+  const range = a === b ? fmtWhen(a) : `${fmtWhen(a)} – ${fmtWhen(b)}`;
+  return chart.timezone ? `${range} (${chart.timezone})` : range;
+}
+
+function renderWarnings() {
+  const box = document.getElementById("warnings");
+  box.replaceChildren();
+  for (const w of chart.warnings || []) html("p", {}, box, w);
+}
+
+function renderModelChips() {
+  const nav = document.getElementById("models");
+  nav.replaceChildren();
+  nav.hidden = modelIds.length < 2;
+  if (nav.hidden) return;
+  chip(nav, "All models", selectedModel === null, () => { selectedModel = null; render(); });
+  for (const id of modelIds) {
+    chip(nav, modelName(id), selectedModel === id, () => { selectedModel = id; render(); }, colorOf(id));
+  }
+}
+
+function shownModels(f) {
+  if (!f.has("model")) return [undefined];
+  const labels = f.coords.model.labels;
+  const order = modelIds.filter((id) => labels.includes(id));
+  return selectedModel === null ? order : order.filter((id) => id === selectedModel);
+}
+
+// ---- graphs -----------------------------------------------------------------------------------------------
+
+const MARGIN = { l: 44, r: 8, t: 6, b: 20 };
+const TOP_AXIS = 16;
+let graphPanels = []; // { svg, x(t), field, place, frame }
+let hoverX = null;
+
+function xAxisOf(f) {
+  const d = X_DIMS.find((x) => f.has(x));
+  const c = f.coords[d];
+  if (d === "time") {
+    const step = stepMinutes(c.step);
+    return { dim: d, positions: c.minutes, width: step, time: true, route: c.lat ? c : null };
+  }
+  if (d === "hour") return { dim: d, positions: c.values, width: 1, labels: c.values.map((h) => `${h}:00`) };
+  return { dim: d, positions: c.labels.map((_, i) => i), width: 1, labels: c.labels };
+}
+
+function renderGraphs(body, graphs) {
+  graphPanels = [];
+  const axes = graphs.map(xAxisOf);
+  const timeAxes = axes.filter((a) => a.time);
+  const route = timeAxes.find((a) => a.route);
+  if (route) renderRouteMap(body, route.route);
+  // Graphs share one x range per kind of axis.
+  const ranges = {};
+  for (const a of axes) {
+    const r = ranges[a.dim] || [Infinity, -Infinity];
+    const [first, last] = extent(a.positions);
+    ranges[a.dim] = [Math.min(r[0], first), Math.max(r[1], last + a.width)];
+  }
+  const legend = html("div", { class: "legend" }, body);
+  const anyMembers = graphs.some((f) => f.has("member"));
+  const anyQuantile = graphs.some((f) => f.has("quantile"));
+  if (anyMembers) legendItem(legend, "var(--ink-2)", "thin", "one line per member");
+  if (anyMembers || anyQuantile) legendItem(legend, "var(--ink-2)", "band", anyMembers ? "10–90 % of members" : "quantile range");
+  if (anyMembers || anyQuantile) legendItem(legend, "var(--ink-2)", "", "median");
+  if (!legend.childNodes.length) legend.remove();
+  const width = Math.max(document.getElementById("body").clientWidth, 280);
+  let first = true;
+  graphs.forEach((f, i) => {
+    const places = f.has("point") ? f.size("point") : 1;
+    for (let p = 0; p < places; p++) {
+      const panel = html("div", { class: "panel" }, body);
+      const head = html("div", { class: "panel-head" }, panel);
+      const label = html("span", {}, head);
+      html("b", {}, label, fieldLabel(f));
+      label.appendChild(document.createTextNode(`${f.unit && !f.percent ? ` ${f.unit}` : ""}`));
+      if (f.has("point")) head.appendChild(document.createTextNode(placeName(f, p)));
+      const top = first && axes[i].time ? MARGIN.t + TOP_AXIS : MARGIN.t;
+      const height = 120 + top + MARGIN.b;
+      const svg = el("svg", { viewBox: `0 0 ${width} ${height}`, height, tabindex: 0, role: "img",
+        "aria-label": `${fieldLabel(f)} graph; use the arrow keys to read values` }, panel);
+      const frame = { width, height, top, axis: axes[i], range: ranges[axes[i].dim], topAxis: first && axes[i].time };
+      drawGraph(svg, f, p, frame);
+      first = false;
+    }
+  });
+}
+
+function placeName(f, p) {
+  const c = f.coords.point;
+  return c.labels ? c.labels[p] : `${c.lat[p].toFixed(2)}, ${c.lon[p].toFixed(2)}`;
+}
+
+function niceTicks(lo, hi, count) {
+  const span = hi - lo || 1;
+  const raw = span / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map((k) => k * mag).find((s) => span / s <= count) || 10 * mag;
+  const ticks = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-9; v += step) ticks.push(+v.toFixed(10));
+  return ticks;
+}
+
+// The series of a graph panel: per model, members and/or quantile levels, along the x axis.
+function seriesOf(f, place, model) {
+  const n = f.size(xAxisOf(f).dim);
+  const xdim = xAxisOf(f).dim;
+  const base = { point: place };
+  if (model !== undefined) base.model = modelIndex(f, model);
+  const read = (extra) => Array.from({ length: n }, (_, i) => f.at({ ...base, ...extra, [xdim]: i }));
+  if (f.has("member")) {
+    const members = Array.from({ length: f.size("member") }, (_, m) => read({ member: m }));
+    const q = { p10: [], p50: [], p90: [] };
+    for (let i = 0; i < n; i++) {
+      const column = members.map((row) => row[i]).filter((v) => v !== null).sort((a, b) => a - b);
+      q.p10.push(quantile(column, 0.1));
+      q.p50.push(quantile(column, 0.5));
+      q.p90.push(quantile(column, 0.9));
+    }
+    return { members, bands: [[q.p10, q.p90]], median: q.p50 };
+  }
+  if (f.has("quantile")) {
+    const levels = f.coords.quantile.values;
+    const order = levels.map((q, i) => [q, i]).sort((a, b) => a[0] - b[0]).map((x) => x[1]);
+    const lines = order.map((i) => read({ quantile: i }));
+    const bands = [];
+    for (let i = 0; i < Math.floor(lines.length / 2); i++) bands.push([lines[i], lines[lines.length - 1 - i]]);
+    const median = lines.length % 2 ? lines[(lines.length - 1) / 2] : null;
+    return { members: [], bands, median };
+  }
+  return { members: [], bands: [], median: read({}) };
+}
+
+function drawGraph(svg, f, place, frame) {
+  const { width, height, top, axis, range } = frame;
+  const [x0, x1] = range;
+  const x = (t) => MARGIN.l + ((t - x0) / (x1 - x0 || 1)) * (width - MARGIN.l - MARGIN.r);
+  const models = shownModels(f);
+  const series = models.map((m) => ({ model: m, color: colorOf(m), ...seriesOf(f, place, m) }));
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const s of series) {
+    for (const row of [...s.members, ...s.bands.flat(), s.median || []]) {
+      for (const v of row) {
+        if (v === null) continue;
+        lo = Math.min(lo, v);
+        hi = Math.max(hi, v);
+      }
+    }
+  }
+  if (!isFinite(lo)) { lo = 0; hi = 1; }
+  if (f.percent || f.yesno) { lo = 0; hi = Math.max(hi, 1); }
+  if (lo > 0 && lo < (hi - lo) * 0.5) lo = 0;
+  if (hi - lo < 1e-9) hi = lo + 1;
+  const ticks = niceTicks(lo, hi, 4);
+  lo = Math.min(lo, ticks[0]);
+  hi = Math.max(hi, ticks[ticks.length - 1]);
+  const y = (v) => top + (1 - (v - lo) / (hi - lo)) * (height - top - MARGIN.b);
+
+  const grid = el("g", {}, svg);
+  for (const tick of ticks) {
+    el("line", { x1: MARGIN.l, x2: width - MARGIN.r, y1: y(tick), y2: y(tick), stroke: "var(--grid)",
+      "shape-rendering": "crispEdges" }, grid);
+    el("text", { x: MARGIN.l - 6, y: y(tick) + 4, "text-anchor": "end" }, grid).textContent = fmtTick(f, tick);
+  }
+  if (axis.time) {
+    const days = [];
+    for (let t = Math.ceil(x0 / 60) * 60; t <= x1; t += 60) if (hourOf(t) === 0) days.push(t);
+    for (const t of days) {
+      el("line", { x1: x(t), x2: x(t), y1: top, y2: height - MARGIN.b, stroke: "var(--axis)",
+        "shape-rendering": "crispEdges" }, grid);
+    }
+    const edges = [x0, ...days, x1];
+    const labelYs = [height - 5, frame.topAxis ? TOP_AXIS - 2 : null].filter((v) => v !== null);
+    for (const labelY of labelYs) {
+      for (let i = 0; days.length && i + 1 < edges.length; i++) {
+        if (x(edges[i + 1]) - x(edges[i]) < 28) continue;
+        el("text", { x: (x(edges[i]) + x(edges[i + 1])) / 2, y: labelY, "text-anchor": "middle" }, grid)
+          .textContent = fmtDay((edges[i] + edges[i + 1]) / 2);
+      }
+      if (days.length === 0) {
+        // Within one day: label whole hours, as many as fit.
+        const every = [1, 2, 3, 6, 12].find((h) => x(x0 + h * 60) - x(x0) >= 44) || 24;
+        for (let t = Math.ceil(x0 / 60) * 60; t <= x1; t += 60) {
+          if (hourOf(t) % every) continue;
+          const anchor = x(t) > width - MARGIN.r - 16 ? "end" : "middle";
+          el("text", { x: Math.min(x(t), width - MARGIN.r), y: labelY, "text-anchor": anchor }, grid)
+            .textContent = `${hourOf(t)}:00`;
+        }
+      }
+    }
+  } else {
+    const every = Math.ceil(axis.positions.length / Math.max(2, Math.floor((width - MARGIN.l) / 48)));
+    axis.positions.forEach((p, i) => {
+      if (i % every) return;
+      el("text", { x: x(p + axis.width / 2), y: height - 5, "text-anchor": "middle" }, grid)
+        .textContent = String(axis.labels[i]);
+    });
+  }
+  el("line", { x1: MARGIN.l, x2: width - MARGIN.r, y1: y(lo), y2: y(lo), stroke: "var(--axis)",
+    "shape-rendering": "crispEdges" }, grid);
+
+  const marks = el("g", {}, svg);
+  const single = series.length === 1;
+  for (const s of series) {
+    for (const [low, high] of s.bands) band(marks, axis, low, high, x, y, s.color, single ? 0.22 : 0.12);
+    for (const row of s.members) line(marks, axis, row, x, y, s.color, 1, single ? 0.22 : 0.1);
+    if (s.median) line(marks, axis, s.median, x, y, s.color, 2, 1);
+  }
+  const cursor = el("line", { y1: top, y2: height - MARGIN.b, stroke: "var(--ink-2)", visibility: "hidden",
+    "shape-rendering": "crispEdges" }, svg);
+  const entry = { svg, cursor, x, field: f, place, series, axis, range };
+  graphPanels.push(entry);
+  attachGraphHover(entry);
+}
+
+// Points along x: hourly values at their label; coarser steps (resampled) hold over their bucket.
+function pts(axis, values, x, y) {
+  const out = [];
+  values.forEach((v, i) => {
+    if (v === null) { out.push(null); return; }
+    const p = axis.positions[i];
+    if (axis.time && axis.width > 60) out.push([x(p), y(v)], [x(p + axis.width), y(v)]);
+    else if (!axis.time) out.push([x(p + axis.width / 2), y(v)]);
+    else out.push([x(p), y(v)]);
+  });
+  return out;
+}
+
+function pathOf(points) {
+  let d = "";
+  let pen = false;
+  for (const p of points) {
+    if (!p) { pen = false; continue; }
+    d += `${pen ? "L" : "M"}${p[0].toFixed(1)},${p[1].toFixed(1)}`;
+    pen = true;
+  }
+  return d;
+}
+
+function line(parent, axis, values, x, y, color, width, opacity) {
+  const points = pts(axis, values, x, y);
+  const d = pathOf(points);
+  if (!d) return;
+  if (points.filter(Boolean).length === 1) {
+    const [px, py] = points.find(Boolean);
+    el("circle", { cx: px, cy: py, r: 4, fill: color, "fill-opacity": opacity }, parent);
+    return;
+  }
+  el("path", { d, fill: "none", stroke: color, "stroke-width": width, "stroke-opacity": opacity,
+    "stroke-linejoin": "round", "stroke-linecap": "round" }, parent);
+}
+
+function band(parent, axis, low, high, x, y, color, opacity) {
+  const upper = pts(axis, high, x, y);
+  const lower = pts(axis, low, x, y);
+  let run = [];
+  const flush = () => {
+    if (run.length > 1) {
+      const d = `${pathOf(run.map((i) => upper[i]))}L${pathOf(run.map((i) => lower[i]).reverse()).slice(1)}Z`;
+      el("path", { d, fill: color, "fill-opacity": opacity, stroke: "none" }, parent);
+    }
+    run = [];
+  };
+  for (let i = 0; i < upper.length; i++) {
+    if (upper[i] && lower[i]) run.push(i); else flush();
+  }
+  flush();
+}
+
+function attachGraphHover(entry) {
+  const { svg, axis, range } = entry;
+  const width = svg.viewBox.baseVal.width;
+  const toX = (clientX) => {
+    const box = svg.getBoundingClientRect();
+    const px = ((clientX - box.left) / box.width) * width;
+    const raw = range[0] + ((px - MARGIN.l) / (width - MARGIN.l - MARGIN.r)) * (range[1] - range[0]);
+    return nearest(axis, raw);
+  };
+  const move = (e) => setGraphHover(toX(e.clientX), entry, e.clientY);
+  svg.addEventListener("pointermove", move);
+  svg.addEventListener("pointerdown", move);
+  svg.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") setGraphHover(null); });
+  svg.addEventListener("blur", () => setGraphHover(null));
+  svg.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    let i = hoverX === null ? -1 : axis.positions.indexOf(hoverX);
+    i = i < 0 ? 0 : Math.max(0, Math.min(axis.positions.length - 1, i + (e.key === "ArrowRight" ? 1 : -1)));
+    const box = svg.getBoundingClientRect();
+    setGraphHover(axis.positions[i], entry, box.top + box.height / 3);
+  });
+}
+
+function nearest(axis, raw) {
+  let best = null;
+  for (const p of axis.positions) {
+    const centre = axis.time ? p : p + axis.width / 2;
+    if (best === null || Math.abs(centre - raw) < Math.abs(best.c - raw)) best = { p, c: centre };
+  }
+  return best ? best.p : null;
+}
+
+function setGraphHover(position, entry, clientY) {
+  hoverX = position;
+  for (const panel of graphPanels) {
+    const show = position !== null && panel.axis.dim === (entry && entry.axis.dim);
+    panel.cursor.setAttribute("visibility", show ? "visible" : "hidden");
+    if (show) {
+      const cx = panel.axis.time ? panel.x(position) : panel.x(position + panel.axis.width / 2);
+      panel.cursor.setAttribute("x1", cx);
+      panel.cursor.setAttribute("x2", cx);
+    }
+  }
+  updateRouteCursor(position, entry);
+  if (position === null) { hideTooltip(); return; }
+  const tooltip = document.getElementById("tooltip");
+  tooltip.replaceChildren();
+  const i = entry.axis.positions.indexOf(position);
+  html("div", { class: "when" }, tooltip, entry.axis.time ? fmtWhen(position) : String(entry.axis.labels[i]));
+  for (const s of entry.series) {
+    const median = s.median ? s.median[i] : null;
+    const range = s.bands.length ? [s.bands[0][0][i], s.bands[0][1][i]] : null;
+    tooltipRow(tooltip, s.color, entry.field, median, range, s.model !== undefined ? modelName(s.model) : "");
+  }
+  placeTooltip(entry.svg, entry.axis.time ? entry.x(position) : entry.x(position + entry.axis.width / 2), clientY);
+}
+
+function tooltipRow(parent, color, f, value, range, what) {
+  const row = html("div", { class: "row" }, parent);
+  const key = html("span", { class: "key" }, row);
+  key.style.color = color;
+  html("strong", {}, row, fmtValue(f, value));
+  if (range && range[0] !== null && range[1] !== null) {
+    html("span", { class: "range" }, row, `${fmtValue(f, range[0])}–${fmtValue(f, range[1])}`);
+  }
+  if (what) html("span", { class: "what" }, row, what);
+}
+
+function placeTooltip(svg, svgX, clientY) {
+  const tooltip = document.getElementById("tooltip");
+  tooltip.style.display = "block";
+  const app = document.getElementById("app").getBoundingClientRect();
+  const box = svg.getBoundingClientRect();
+  const px = box.left - app.left + (svgX / svg.viewBox.baseVal.width) * box.width;
+  const w = tooltip.offsetWidth;
+  const left = px + 12 + w > app.width - 8 ? px - 12 - w : px + 12;
+  tooltip.style.left = `${Math.max(8, left)}px`;
+  tooltip.style.top = `${Math.max(4, clientY - app.top - tooltip.offsetHeight - 12)}px`;
+}
+
+function hideTooltip() {
+  document.getElementById("tooltip").style.display = "none";
+}
+
+document.addEventListener("pointerdown", (e) => {
+  if (!e.target.closest || !e.target.closest(".panel svg")) {
+    setGraphHover(null);
+    hideTooltip();
+  }
+});
+
+// ---- maps -------------------------------------------------------------------------------------------------
+
+// Equirectangular, x scaled by cos(latitude) at the centre.
+function projection(bounds, width) {
+  const [s, w, n, e] = bounds;
+  const k = Math.cos(((s + n) / 2) * Math.PI / 180);
+  const spanX = (e - w) * k;
+  const spanY = n - s;
+  const height = Math.min(Math.max(width * spanY / spanX, 0.4 * width), 1.4 * width);
+  const scale = Math.min(width / spanX, height / spanY);
+  const ox = (width - spanX * scale) / 2;
+  const oy = (height - spanY * scale) / 2;
+  return {
+    width, height,
+    x: (lon) => ox + (lon - w) * k * scale,
+    y: (lat) => oy + (n - lat) * scale,
+  };
+}
+
+function drawBasemap(svg, p) {
+  const map = chart.basemap;
+  if (!map) return;
+  const g = el("g", { fill: "none", stroke: "var(--land)", "stroke-linejoin": "round" }, svg);
+  for (const [lines, width, dash] of [[map.coastline, 1, ""], [map.borders, 0.7, "3 2"]]) {
+    for (const coords of lines) {
+      let d = "";
+      for (let i = 0; i < coords.length; i += 2) d += `${i ? "L" : "M"}${p.x(coords[i + 1]).toFixed(1)},${p.y(coords[i]).toFixed(1)}`;
+      el("path", { d, "stroke-width": width, "stroke-opacity": 0.7, ...(dash ? { "stroke-dasharray": dash } : {}) }, g);
+    }
+  }
+}
+
+// Sequential (one hue, light → dark) for magnitudes; diverging around 0 for values on both sides.
+const SEQ = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"];
+const DIV_NEG = ["#0d366b", "#256abf", "#6da7ec", "#cde2fb"];
+const DIV_POS = ["#fbd5cd", "#ef8f7d", "#d4483b", "#8f1d1b"];
+
+function colorScale(lo, hi) {
+  if (lo < 0 && hi > 0) {
+    const m = Math.max(-lo, hi);
+    return { lo: -m, hi: m, color: (v) => (v < 0 ? ramp(DIV_NEG, 1 + v / m) : ramp(DIV_POS, v / m)),
+      stops: [...DIV_NEG, "#f0efec", ...DIV_POS] };
+  }
+  return { lo, hi, color: (v) => ramp(SEQ, (v - lo) / (hi - lo || 1)), stops: SEQ };
+}
+
+function ramp(stops, t) {
+  t = Math.max(0, Math.min(1, t));
+  const pos = t * (stops.length - 1);
+  const i = Math.min(Math.floor(pos), stops.length - 2);
+  return mix(stops[i], stops[i + 1], pos - i);
+}
+
+function mix(a, b, t) {
+  const pa = [1, 3, 5].map((k) => parseInt(a.slice(k, k + 2), 16));
+  const pb = [1, 3, 5].map((k) => parseInt(b.slice(k, k + 2), 16));
+  return `rgb(${pa.map((v, k) => Math.round(v + (pb[k] - v) * t)).join(",")})`;
+}
+
+function renderMaps(body, f) {
+  const models = shownModels(f);
+  html("h2", {}, body, `${fieldLabel(f)}${f.unit && !f.percent ? ` (${f.unit})` : ""}`);
+  const controls = html("div", {}, body);
+  if (f.has("quantile")) {
+    const nav = html("div", { class: "chips" }, controls);
+    const levels = f.coords.quantile.values;
+    if (f.view.quantile === null) f.view.quantile = Math.floor(levels.length / 2);
+    levels.forEach((q, i) => chip(nav, quantileLabel(q), f.view.quantile === i, () => {
+      f.view.quantile = i;
+      render();
+    }));
+  }
+  const times = f.has("time") ? f.coords.time.minutes : null;
+  // One colour scale across models and times, so maps compare.
+  let [lo, hi] = extent(f.data) || [0, 1];
+  if (f.percent || f.yesno) { lo = 0; hi = 1; }
+  const scale = colorScale(lo, hi);
+  const grid = html("div", { class: "maps" }, body);
+  // Drawing units; the SVG scales to its grid cell.
+  const width = 600;
+  const draws = [];
+  for (const model of models) {
+    const cell = html("div", { class: "panel" }, grid);
+    if (model !== undefined) {
+      const head = html("div", { class: "panel-head" }, cell);
+      const label = html("span", {}, head);
+      const key = html("span", { class: "key" }, label);
+      key.style.color = colorOf(model);
+      key.style.marginRight = "6px";
+      label.appendChild(document.createTextNode(modelName(model)));
+    }
+    const p = projection(chart.basemap ? chart.basemap.bounds : boundsOf(f), width);
+    const svg = el("svg", { viewBox: `0 0 ${p.width} ${p.height}`, height: p.height, role: "img",
+      "aria-label": `Map of ${fieldLabel(f)}${model ? ` for ${modelName(model)}` : ""}` }, cell);
+    const layer = el("g", {}, svg);
+    drawBasemap(svg, p);
+    const labels = el("g", {}, svg);
+    draws.push(() => drawMapLayer(layer, labels, f, model, p, scale));
+  }
+  const legend = html("div", { class: "scale" }, body);
+  html("span", {}, legend, fmtValue(f, scale.lo));
+  const bar = html("span", { class: "bar" }, legend);
+  bar.style.background = `linear-gradient(to right, ${scale.stops.join(", ")})`;
+  html("span", {}, legend, fmtValue(f, scale.hi));
+  const redraw = () => draws.forEach((d) => d());
+  if (times && times.length > 1) timeSlider(body, f, times, redraw);
+  redraw();
+}
+
+function boundsOf(f) {
+  const lats = f.has("lat") ? f.coords.lat.values : f.coords.point.lat;
+  const lons = f.has("lon") ? f.coords.lon.values : f.coords.point.lon;
+  const [s, n] = extent(lats);
+  const [w, e] = extent(lons);
+  return [s - 0.5, w - 0.5, n + 0.5, e + 0.5];
+}
+
+function drawMapLayer(layer, labels, f, model, p, scale) {
+  layer.replaceChildren();
+  labels.replaceChildren();
+  const index = { time: f.view.timeIndex, quantile: f.view.quantile || 0 };
+  if (model !== undefined) index.model = modelIndex(f, model);
+  if (f.has("lat")) {
+    const lats = f.coords.lat.values;
+    const lons = f.coords.lon.values;
+    const dLat = lats.length > 1 ? Math.abs(lats[1] - lats[0]) : 0.1;
+    const dLon = lons.length > 1 ? Math.abs(lons[1] - lons[0]) : 0.1;
+    lats.forEach((lat, i) => lons.forEach((lon, j) => {
+      const v = f.at({ ...index, lat: i, lon: j });
+      if (v === null) return;
+      const x0 = p.x(lon - dLon / 2);
+      const y0 = p.y(lat + dLat / 2);
+      const rect = el("rect", { x: x0, y: y0, width: p.x(lon + dLon / 2) - x0 + 0.5,
+        height: p.y(lat - dLat / 2) - y0 + 0.5, fill: scale.color(v), "fill-opacity": 0.85 }, layer);
+      cellHover(rect, f, v, `${lat.toFixed(2)}, ${lon.toFixed(2)}`, model);
+    }));
+    return;
+  }
+  const c = f.coords.point;
+  c.lat.forEach((lat, i) => {
+    const v = f.at({ ...index, point: i });
+    const cx = p.x(c.lon[i]);
+    const cy = p.y(lat);
+    const dot = el("circle", { cx, cy, r: 7, fill: v === null ? "var(--surface)" : scale.color(v),
+      stroke: "var(--ink)", "stroke-width": 1 }, layer);
+    cellHover(dot, f, v, placeName(f, i), model);
+    el("text", { x: cx + 10, y: cy + 4, class: "place" }, labels).textContent =
+      `${c.labels ? `${c.labels[i]} ` : ""}${fmtValue(f, v)}`;
+  });
+}
+
+function cellHover(node, f, value, where, model) {
+  const show = (e) => {
+    const tooltip = document.getElementById("tooltip");
+    tooltip.replaceChildren();
+    html("div", { class: "when" }, tooltip, f.has("time") ? `${where} · ${fmtWhen(f.coords.time.minutes[f.view.timeIndex])}` : where);
+    tooltipRow(tooltip, model !== undefined ? colorOf(model) : "var(--s1)", f, value, null,
+      model !== undefined ? modelName(model) : "");
+    const svg = node.ownerSVGElement;
+    const box = svg.getBoundingClientRect();
+    placeTooltip(svg, ((e.clientX - box.left) / box.width) * svg.viewBox.baseVal.width, e.clientY);
+  };
+  node.addEventListener("pointermove", show);
+  node.addEventListener("pointerdown", show);
+  node.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") hideTooltip(); });
+}
+
+function stopPlaying() {
+  if (playing) clearInterval(playing.timer);
+  playing = null;
+}
+
+function timeSlider(body, f, times, redraw) {
+  const row = html("div", { class: "slider" }, body);
+  const play = html("button", { type: "button", "aria-label": "Play" }, row, "▶");
+  const input = html("input", { type: "range", min: 0, max: times.length - 1, step: 1, value: f.view.timeIndex,
+    "aria-label": "Time" }, row);
+  const out = html("output", {}, row, fmtWhen(times[f.view.timeIndex]));
+  const set = (i) => {
+    f.view.timeIndex = i;
+    input.value = i;
+    out.textContent = fmtWhen(times[i]);
+    hideTooltip();
+    redraw();
+  };
+  input.addEventListener("input", () => set(Number(input.value)));
+  play.addEventListener("click", () => {
+    const mine = playing && playing.field === f;
+    stopPlaying();
+    for (const b of document.querySelectorAll(".slider button")) b.textContent = "▶";
+    if (mine) return;
+    play.textContent = "❚❚";
+    playing = { field: f, timer: setInterval(() => set((f.view.timeIndex + 1) % times.length), 600) };
+  });
+}
+
+// Routes: the track on the basemap, with the hovered sample marked.
+let routeMap = null;
+
+function renderRouteMap(body, coord) {
+  const width = 600;
+  const bounds = chart.basemap ? chart.basemap.bounds
+    : [extent(coord.lat)[0], extent(coord.lon)[0], extent(coord.lat)[1], extent(coord.lon)[1]];
+  const p = projection(bounds, width);
+  const panel = html("div", { class: "panel" }, body);
+  panel.style.maxWidth = "420px";
+  const svg = el("svg", { viewBox: `0 0 ${p.width} ${p.height}`, role: "img", "aria-label": "Map of the route" },
+    panel);
+  drawBasemap(svg, p);
+  let d = "";
+  coord.lat.forEach((lat, i) => { d += `${i ? "L" : "M"}${p.x(coord.lon[i]).toFixed(1)},${p.y(lat).toFixed(1)}`; });
+  el("path", { d, fill: "none", stroke: "var(--ink)", "stroke-width": 2.5, "stroke-linejoin": "round" }, svg);
+  const marker = el("circle", { r: 5, fill: "var(--s1)", stroke: "var(--surface)", "stroke-width": 2,
+    visibility: "hidden" }, svg);
+  routeMap = { coord, p, marker };
+}
+
+function updateRouteCursor(position, entry) {
+  if (!routeMap) return;
+  const i = position === null || !entry || !entry.axis.time ? -1 : routeMap.coord.minutes.indexOf(position);
+  routeMap.marker.setAttribute("visibility", i < 0 ? "hidden" : "visible");
+  if (i >= 0) {
+    routeMap.marker.setAttribute("cx", routeMap.p.x(routeMap.coord.lon[i]));
+    routeMap.marker.setAttribute("cy", routeMap.p.y(routeMap.coord.lat[i]));
+  }
+}
+
+// ---- dots: values without an axis (per model, member, quantile) ------------------------------------------
+
+function renderDots(body, f) {
+  html("h2", {}, body, `${fieldLabel(f)}${f.unit && !f.percent ? ` (${f.unit})` : ""}`);
+  if (!f.dims.length) {
+    html("div", { class: "stat" }, body, fmtValue(f, f.data[0]));
+    return;
+  }
+  const models = shownModels(f);
+  const places = f.has("point") ? f.size("point") : 1;
+  const rows = [];
+  for (let p = 0; p < places; p++) {
+    for (const model of models) {
+      const index = { point: p };
+      if (model !== undefined) index.model = modelIndex(f, model);
+      let values;
+      let marks;
+      if (f.has("member")) {
+        values = Array.from({ length: f.size("member") }, (_, m) => f.at({ ...index, member: m })).filter((v) => v !== null);
+        const sorted = [...values].sort((a, b) => a - b);
+        marks = { dots: values, range: [quantile(sorted, 0.1), quantile(sorted, 0.9)], mid: quantile(sorted, 0.5) };
+      } else if (f.has("quantile")) {
+        const levels = f.coords.quantile.values;
+        values = levels.map((_, q) => f.at({ ...index, quantile: q }));
+        const finite = values.filter((v) => v !== null);
+        const median = levels.indexOf(0.5);
+        marks = { dots: [], range: extent(finite), mid: median >= 0 ? values[median] : null };
+      } else {
+        values = [f.at(index)];
+        marks = { dots: [], range: null, mid: values[0] };
+      }
+      const name = [f.has("point") ? placeName(f, p) : "", model !== undefined ? modelName(model) : ""]
+        .filter(Boolean).join(" · ") || fieldLabel(f);
+      rows.push({ name, model, values, marks });
+    }
+  }
+  const all = rows.flatMap((r) => r.values).filter((v) => v !== null);
+  let [lo, hi] = extent(all) || [0, 1];
+  lo = Math.min(lo, 0);
+  if (f.percent || f.yesno) hi = Math.max(hi, 1);
+  const ticks = niceTicks(lo, hi, 4);
+  lo = Math.min(lo, ticks[0]);
+  hi = Math.max(hi, ticks[ticks.length - 1]);
+  const width = Math.max(280, Math.min(document.getElementById("body").clientWidth, 720));
+  const labelW = Math.min(150, width * 0.35);
+  const rowH = 26;
+  const height = rows.length * rowH + 22;
+  const x = (v) => labelW + ((v - lo) / (hi - lo || 1)) * (width - labelW - 12);
+  const panel = html("div", { class: "panel" }, body);
+  const svg = el("svg", { viewBox: `0 0 ${width} ${height}`, height, role: "img",
+    "aria-label": `${fieldLabel(f)} per model` }, panel);
+  for (const t of ticks) {
+    el("line", { x1: x(t), x2: x(t), y1: 0, y2: height - 18, stroke: "var(--grid)", "shape-rendering": "crispEdges" }, svg);
+    el("text", { x: x(t), y: height - 4, "text-anchor": "middle" }, svg).textContent = fmtTick(f, t);
+  }
+  rows.forEach((r, i) => {
+    const cy = i * rowH + rowH / 2;
+    const color = colorOf(r.model);
+    el("text", { x: 0, y: cy + 4, class: "place" }, svg).textContent = r.name.length > 24 ? `${r.name.slice(0, 23)}…` : r.name;
+    if (r.marks.range) {
+      el("line", { x1: x(r.marks.range[0]), x2: x(r.marks.range[1]), y1: cy, y2: cy, stroke: color,
+        "stroke-width": 6, "stroke-opacity": 0.25, "stroke-linecap": "round" }, svg);
+    }
+    for (const v of r.marks.dots) el("circle", { cx: x(v), cy, r: 2.5, fill: color, "fill-opacity": 0.45 }, svg);
+    if (r.marks.mid !== null) {
+      el("circle", { cx: x(r.marks.mid), cy, r: 5, fill: color, stroke: "var(--surface)", "stroke-width": 2 }, svg);
+      el("text", { x: Math.min(x(r.marks.mid) + 9, width - 60), y: cy - 7 }, svg).textContent = fmtValue(f, r.marks.mid);
+    }
+  });
+}
+
+// ---- table, notes, attribution ----------------------------------------------------------------------------
+
+function renderTable() {
+  const wrap = document.getElementById("table");
+  wrap.replaceChildren();
+  const table = html("table", {}, wrap);
+  const head = table.createTHead().insertRow();
+  const body = table.createTBody();
+  let rows = 0;
+  for (const f of fields) {
+    const dims = f.dims;
+    for (const text of [...dims, fieldLabel(f) + (f.unit && !f.percent ? ` (${f.unit})` : "")]) {
+      if (rows === 0) html("th", {}, head, text);
+    }
+    if (rows > 0) break; // one field per table; the chart shows the rest
+    const total = f.data.length;
+    for (let k = 0; k < Math.min(total, 2000); k++) {
+      const row = body.insertRow();
+      let rest = k;
+      dims.forEach((d, i) => {
+        const pos = Math.floor(rest / f.strides[i]);
+        rest %= f.strides[i];
+        row.insertCell().textContent = coordText(f, d, pos);
+      });
+      row.insertCell().textContent = fmtValue(f, f.data[k]);
+      rows++;
+    }
+    if (total > 2000) html("p", {}, wrap, `First 2000 of ${total} values.`);
+  }
+}
+
+function coordText(f, dim, i) {
+  const c = f.coords[dim];
+  if (dim === "time") return fmtWhen(c.minutes[i]);
+  if (dim === "model") return modelName(c.labels[i]);
+  if (dim === "point") return placeName(f, i);
+  if (dim === "quantile") return quantileLabel(c.values[i]);
+  return String((c.values || c.labels)[i]);
+}
+
+function renderNotes() {
+  const notes = document.getElementById("notes");
+  notes.replaceChildren();
+  for (const m of chart.models || []) {
+    let text = `${m.name}: run ${m.run}, ${m.members} members, lead ${m.lead_hours[0]}–${m.lead_hours[1]} h`;
+    if (m.missing_variables) text += `; no ${m.missing_variables.join(", ")}`;
+    html("p", {}, notes, text);
+  }
+}
+
+function renderAttribution() {
+  const footer = document.getElementById("attribution");
+  footer.replaceChildren();
+  const seen = new Set();
+  for (const a of chart.attribution || []) {
+    const text = [a.model, a.run && `run ${a.run}`, a.license, a.notice].filter(Boolean).join(" · ");
+    if (seen.has(text)) continue;
+    seen.add(text);
+    html("p", {}, footer, text);
+  }
+  if (chart.basemap) html("p", {}, footer, `Map: ${chart.basemap.source}`);
+}
+
+let lastWidth = 0;
+new ResizeObserver(() => {
+  const width = document.getElementById("app").clientWidth;
+  if (chart && width !== lastWidth) {
+    lastWidth = width;
+    render();
+  }
+}).observe(document.getElementById("app"));
+</script>
+</body>
+</html>
