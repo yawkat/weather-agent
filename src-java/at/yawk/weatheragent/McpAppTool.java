@@ -14,8 +14,14 @@ public interface McpAppTool {
     /** JSON schema of the arguments. */
     String inputSchema();
 
-    /** The {@code ui://} resource of the view. */
+    /**
+     * The {@code ui://} resource of the view. Tools link to a copy with the content's hash in its name (see
+     * {@link McpApps}), so clients that cache views by URI pick up a changed view.
+     */
     String viewUri();
+
+    /** HTML of the view. */
+    String view();
 
     /**
      * Run the tool. Gets the arguments as a JSON object and returns a JSON object: {@code {"text": "...",
