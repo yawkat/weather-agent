@@ -8,8 +8,9 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -112,6 +113,8 @@ class EcmwfSource:
         self._index_cache: dict[tuple[datetime, int], list[dict] | None] = {}
         self._index_cache_time: dict[tuple[datetime, int], float] = {}
         self._failed_runs: dict[datetime, float] = {}  # run → when fetching from it failed (time.monotonic)
+        # Queries and prefetch passes run on several threads; guards the two caches above (never held for I/O).
+        self._lock = threading.Lock()
 
     @property
     def name(self) -> str:
@@ -136,14 +139,17 @@ class EcmwfSource:
 
     def _index(self, run: datetime, step: int) -> list[dict] | None:
         key = (run, step)
-        cached = self._index_cache.get(key, ...)
+        with self._lock:
+            cached = self._index_cache.get(key, ...)
+            checked = self._index_cache_time.get(key, 0.0)
         # Positive results never change; re-check missing ones after a few minutes.
-        if cached is not ... and (cached is not None or time.monotonic() - self._index_cache_time[key] < 300):
+        if cached is not ... and (cached is not None or time.monotonic() - checked < 300):
             return cached
         body = self.hosts.get(self.fetcher, self._path(run, step, "index"))
         entries = None if body is None else [json.loads(line) for line in body.decode().splitlines() if line.strip()]
-        self._index_cache[key] = entries
-        self._index_cache_time[key] = time.monotonic()
+        with self._lock:
+            self._index_cache[key] = entries
+            self._index_cache_time[key] = time.monotonic()
         return entries
 
     def candidate_runs(self) -> list[datetime]:
@@ -153,33 +159,34 @@ class EcmwfSource:
 
     def find_run(self, query: Query) -> datetime:
         """Newest run that covers the query and has published every needed step."""
-        runs = self.covering_runs(query)
-        if not runs:
+        run = next(self.covering_runs(query), None)
+        if run is None:
             raise SourceError(f"{self.model.model}: no published run covers this time")
-        return runs[0]
+        return run
 
-    def covering_runs(self, query: Query) -> list[datetime]:
-        """Runs that cover the query and list every needed step, best first (see runs_by_coverage). Runs that
-        recently failed to download come last."""
+    def covering_runs(self, query: Query) -> Iterator[datetime]:
+        """Runs that cover the query and list every needed step, best first (see runs_by_coverage); runs that
+        recently failed to download come last. Lazy: a run's index is only looked up when the runs before it
+        weren't enough, so a query the newest run answers costs no requests for older ones."""
         candidates = self.candidate_runs()
-        for key in [k for k in self._index_cache if k[0] not in candidates]:
-            self._index_cache.pop(key, None)
-            self._index_cache_time.pop(key, None)
         now = time.monotonic()
-        for run in [r for r, at in self._failed_runs.items() if r not in candidates or now - at >= RUN_COOLDOWN_S]:
-            self._failed_runs.pop(run, None)
+        with self._lock:
+            for key in [k for k in self._index_cache if k[0] not in candidates]:
+                del self._index_cache[key], self._index_cache_time[key]
+            for run in [r for r, at in self._failed_runs.items() if r not in candidates or now - at >= RUN_COOLDOWN_S]:
+                del self._failed_runs[run]
+            failed = set(self._failed_runs)
         def sampling(run):
             try:
                 return sampling_for(query, run, self.model.steps(run))
             except OutsideForecast:
                 return None
-        runs = []
-        for run, s in runs_by_coverage(candidates, sampling):
+        ordered = runs_by_coverage(candidates, sampling)
+        for run, s in [(r, s) for r, s in ordered if r not in failed] + [(r, s) for r, s in ordered if r in failed]:
             steps = self.model.steps(run)
             last_step = steps[max(with_previous(s.needed_steps()))]
             if self._index(run, last_step) is not None:
-                runs.append(run)
-        return [r for r in runs if r not in self._failed_runs] + [r for r in runs if r in self._failed_runs]
+                yield run
 
     # -- fetching ------------------------------------------------------------------------------------------------
 
@@ -226,11 +233,25 @@ class EcmwfSource:
             params = sorted({e["_canonical"] for _, wanted in plans.values() for e in wanted})
             log.info("%s run %s: fetching %d step(s) %s, params %s, %.1f MB", self.name, run.strftime("%Y-%m-%d %HZ"),
                      len(plans), step_list(sorted(plans)), ",".join(params), size / 1e6)
-            reserve = None if self.budget is None else lambda: self.budget.reserve(size)
-            if reserve is not None:
+            # Falling back to another host downloads the batch again, so that is reserved too. A failed attempt
+            # fails on its first responses (HTTP 429, 503, 404) and downloads next to nothing: its reservation is
+            # released before the next one, or later attempts and older runs would hit the per-query limit.
+            reservations = []
+
+            def reserve() -> None:
+                if reservations:
+                    self.budget.settle(reservations[-1], 0)
+                reservations.append(self.budget.reserve(size))
+
+            if self.budget is not None:
                 reserve()
-            # Falling back to another host downloads the batch again, so that is reserved too.
-            written = sum(self.hosts.download_many(self.fetcher, [download for download, _ in plans.values()], reserve))
+            written = 0
+            try:
+                written = sum(self.hosts.download_many(self.fetcher, [download for download, _ in plans.values()],
+                                                       reserve if self.budget is not None else None))
+            finally:
+                if reservations:
+                    self.budget.settle(reservations[-1], written)
             for step, (download, wanted) in plans.items():
                 self._store_step(run, step, download.dest, wanted)
         finally:
@@ -280,20 +301,27 @@ class EcmwfSource:
 
     def _fetch(self, query: Query, variables: Collection[str]):
         runs = self.covering_runs(query)
-        if not runs:
-            raise SourceError(f"{self.model.model}: no published run covers this time")
         error: SourceError | None = None
-        for run in runs[:MAX_RUNS_TRIED]:
+        for _ in range(MAX_RUNS_TRIED):
+            try:
+                run = next(runs, None)
+            except SourceError:
+                if error is None:
+                    raise
+                break  # an older run's index can't be fetched either: report why the newer one failed
+            if run is None:
+                break
             try:
                 return self._fetch_run(query, variables, run)
             except BudgetExceeded:
                 raise  # not the run's fault: another run would need as much
             except SourceError as e:  # not published on any working host, or every host failing
-                self._failed_runs[run] = time.monotonic()
+                with self._lock:
+                    self._failed_runs[run] = time.monotonic()
                 log.warning("%s run %s can't be fetched (%s); trying an older run", self.name,
                             run.strftime("%Y-%m-%d %HZ"), e)
                 error = e
-        raise error
+        raise error or SourceError(f"{self.model.model}: no published run covers this time")
 
     def _fetch_run(self, query: Query, variables: Collection[str], run: datetime):
         provided = self.provides()
