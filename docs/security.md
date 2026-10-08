@@ -55,6 +55,14 @@ comprehensions, lambdas, subscripts, huge numbers, deep nesting) are covered by 
 Unexpected errors are logged with a traceback; clients only get `internal error (reference <id>)`. Source
 failures are reported by exception type only.
 
+## Query log
+
+Every tool call is logged at INFO with its outcome and duration, without what locates the caller
+(`weather_core/expr/redact.py`): forecast queries keep their shape, times, models and thresholds, but coordinates
+become `...`, place names, polylines and other unknown strings `'s1'`, and binding names `v1`. Error and warning
+messages are scrubbed of the query's hidden strings, quoted strings and decimals. Place lookups and routes log
+only counts and sizes. Tracebacks of unexpected errors are not redacted.
+
 ## Known gaps
 
 - No per-user authentication or rate limit yet (the secret path is one shared key); the hourly download budget
