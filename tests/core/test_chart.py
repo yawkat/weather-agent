@@ -134,3 +134,18 @@ def test_basemap_is_clipped_to_the_map():
         # Every line has a point inside; at most its ends reach beyond the box.
         assert any(49.0 <= a <= 52.0 and 5.0 <= b <= 8.0 for a, b in zip(lats, lons))
         assert all(49.0 <= a <= 52.0 and 5.0 <= b <= 8.0 for a, b in zip(lats[1:-1], lons[1:-1]))
+
+
+def test_one_grid_coordinate_left_is_a_profile_not_a_map():
+    # Averaging over lon leaves a north-south profile: a graph along lat (members allowed), no basemap.
+    _, chart = forecaster().visualize(f'{AREA}.precip.sum("time").mean("lon")')
+    (field,) = chart["fields"]
+    assert field["dims"] == ["model", "member", "lat"]
+    assert "basemap" not in chart
+
+
+def test_label_fields_are_named_as_omitted():
+    _, chart = forecaster().visualize(
+        f'{{"tmax": {POINT}.t2m.median("member").max("time"), "when": {POINT}.t2m.median("member").idxmax("time")}}')
+    assert [f["name"] for f in chart["fields"]] == ["tmax"]
+    assert chart["omitted"] == ["when"]

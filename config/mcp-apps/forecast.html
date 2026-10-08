@@ -10,8 +10,8 @@
   the default MCP Apps CSP allows no external scripts, styles, images or fetches.
 
   The result (weather_core.chart) is a list of fields, each a dense array with named dimensions. The dimensions
-  pick the drawing: time / hour / distance bins → graph; lat × lon → map (time → slider); point without an x
-  axis → markers on a map; anything else → dots and ranges per model. model → colour, member → thin lines,
+  pick the drawing: time / hour / distance bins, or lat or lon alone (a profile) → graph; lat × lon → map
+  (time → slider); point without an x axis → markers on a map; anything else → dots and ranges per model. model → colour, member → thin lines,
   quantile → bands. The view never reduces data itself: what it shows is what the query asked for.
 -->
 <style>
@@ -261,7 +261,7 @@ request("ui/initialize", {
 
 // Colour follows the model, never its position in this result: fixed slots in this order, then the rest.
 const MODEL_ORDER = ["ecmwf-ens", "ecmwf-aifs-ens", "icon-eu-eps", "icon-d2-eps", "icon-d2-ruc-eps"];
-const X_DIMS = ["time", "hour", "distance_km_bins"];
+const X_DIMS = ["time", "hour", "distance_km_bins", "lat", "lon"]; // lat or lon alone: a profile
 const SVG = "http://www.w3.org/2000/svg";
 
 let chart = null;
@@ -500,6 +500,10 @@ function renderWarnings() {
   const box = document.getElementById("warnings");
   box.replaceChildren();
   for (const w of chart.warnings || []) html("p", {}, box, w);
+  for (const name of chart.omitted || []) {
+    html("p", {}, box, `${name || "The answer"} is a time or place label (idxmax/idxmin); it is in the agent's ` +
+      "answer, not drawn here.");
+  }
 }
 
 function renderModelChips() {
@@ -535,6 +539,9 @@ function xAxisOf(f) {
     return { dim: d, positions: c.minutes, width: step, time: true, route: c.lat ? c : null };
   }
   if (d === "hour") return { dim: d, positions: c.values, width: 1, labels: c.values.map((h) => `${h}:00`) };
+  if (d === "lat" || d === "lon") {
+    return { dim: d, positions: c.values, width: 0, labels: c.values.map((v) => `${+v.toFixed(2)}°${d === "lat" ? "N" : "E"}`) };
+  }
   return { dim: d, positions: c.labels.map((_, i) => i), width: 1, labels: c.labels };
 }
 
@@ -888,14 +895,16 @@ function drawBasemap(svg, p) {
 
 // Sequential (one hue, light → dark) for magnitudes; diverging around 0 for values on both sides.
 const SEQ = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"];
-const DIV_NEG = ["#0d366b", "#256abf", "#6da7ec", "#cde2fb"];
-const DIV_POS = ["#fbd5cd", "#ef8f7d", "#d4483b", "#8f1d1b"];
+// Both arms end in the neutral midpoint, so 0 is grey and not light blue or light red.
+const NEUTRAL = "#f0efec";
+const DIV_NEG = ["#0d366b", "#256abf", "#6da7ec", "#cde2fb", NEUTRAL];
+const DIV_POS = [NEUTRAL, "#fbd5cd", "#ef8f7d", "#d4483b", "#8f1d1b"];
 
 function colorScale(lo, hi) {
   if (lo < 0 && hi > 0) {
     const m = Math.max(-lo, hi);
     return { lo: -m, hi: m, color: (v) => (v < 0 ? ramp(DIV_NEG, 1 + v / m) : ramp(DIV_POS, v / m)),
-      stops: [...DIV_NEG, "#f0efec", ...DIV_POS] };
+      stops: [...DIV_NEG, ...DIV_POS.slice(1)] };
   }
   return { lo, hi, color: (v) => ramp(SEQ, (v - lo) / (hi - lo || 1)), stops: SEQ };
 }

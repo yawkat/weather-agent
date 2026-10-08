@@ -1,7 +1,8 @@
 """Answers as charts (the show_forecast tool): every value of a result, as dense arrays the client's view draws.
 
 The view picks the form from the dimensions left in each field, as docs/query-language.md describes: `time`
-(or `hour`, distance bins) is the x axis of a graph, `lat` × `lon` is a map (over time: a map with a time slider),
+(or `hour`, distance bins, or `lat` or `lon` alone: a profile) is the x axis of a graph, `lat` × `lon` is a map
+(over time: a map with a time slider),
 `point` is places on a map or lines per place. `model` becomes colours, `member` thin lines and `quantile` bands.
 The query decides what is shown; the view only draws it.
 """
@@ -29,7 +30,7 @@ def check_type(typ: Type) -> None:
         what = name or "the answer"
         if t.kind == LABEL:
             continue
-        if LAT in t.dims and MEMBER in t.dims:
+        if LAT in t.dims and LON in t.dims and MEMBER in t.dims:
             raise ExprError(f"{what}: a map can't show every member; reduce member first, e.g. .mean('member') "
                             f"of a condition (a probability) or .quantile(0.9, 'member')")
         if MEMBER in t.dims and QUANTILE in t.dims:
@@ -52,10 +53,11 @@ def encode_chart(value, typ: Type, ctx: rt.Context, max_values: int = MAX_VALUES
                         f"member with .quantile([0.1, 0.5, 0.9], 'member')), resample time, or select a smaller "
                         f"area or fewer models")
     check_type(typ)
-    fields = []
+    fields, omitted = [], []
     for name, v, t in items:
         if t.kind == LABEL:
-            continue  # idxmax/idxmin answers are labels, not values to draw; the table shows them
+            omitted.append(name)  # idxmax/idxmin answers are labels, not values to draw; the agent's table has them
+            continue
         fields.append({
             "name": name,
             "kind": "condition" if t.kind == BOOL else "number",
@@ -65,6 +67,8 @@ def encode_chart(value, typ: Type, ctx: rt.Context, max_values: int = MAX_VALUES
             "data": _values(v.data),
         })
     out: dict = {"fields": fields, "timezone": getattr(ctx.tz, "key", None)}
+    if omitted:
+        out["omitted"] = omitted
     bounds = _map_bounds([v for _, v, _ in items])
     if bounds is not None:
         out["basemap"] = basemap(*bounds)
@@ -103,7 +107,7 @@ def _map_bounds(values: list[rt.Arr]) -> tuple[float, float, float, float] | Non
     """South, west, north, east around every mapped location (grids, points, routes), or None."""
     lats, lons = [], []
     for v in values:
-        if LAT in v.dims:
+        if LAT in v.dims and LON in v.dims:  # one of them alone is a profile (a graph), not a map
             lats += [float(x) for x in v.coords[LAT].labels]
             lons += [float(x) for x in v.coords[LON].labels]
         if POINT in v.dims:
