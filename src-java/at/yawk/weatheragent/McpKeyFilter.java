@@ -1,7 +1,6 @@
 package at.yawk.weatheragent;
 
 import io.micronaut.context.annotation.Context;
-import io.micronaut.context.annotation.Value;
 import io.micronaut.core.annotation.Nullable;
 import io.micronaut.http.HttpRequest;
 import io.micronaut.http.HttpResponse;
@@ -36,9 +35,8 @@ public final class McpKeyFilter {
 
     private final byte @Nullable [] key;
 
-    public McpKeyFilter(@Value("${weather.access-key:}") String key,
-                        @Value("${weather.access-key-file:}") String keyFile) {
-        this.key = load(key, keyFile);
+    public McpKeyFilter(McpAccessConfig config) {
+        this.key = load(config.accessKey(), config.accessKeyFile());
         if (this.key == null) {
             LOG.warn("No access key configured: MCP is open to anyone who can reach {}", PREFIX);
         } else {
@@ -47,10 +45,12 @@ public final class McpKeyFilter {
     }
 
     /**
-     * The key, or null when both settings are empty (the defaults). Any other value must yield a valid key: a
-     * whitespace-only setting or an empty key file (placeholder, failed decryption) fails instead of opening MCP.
+     * The key, or null when both settings are unset or empty (the defaults). Any other value must yield a valid key:
+     * a whitespace-only setting or an empty key file (placeholder, failed decryption) fails instead of opening MCP.
      */
-    static byte @Nullable [] load(String key, String keyFile) {
+    static byte @Nullable [] load(@Nullable String key, @Nullable String keyFile) {
+        key = key == null ? "" : key;
+        keyFile = keyFile == null ? "" : keyFile;
         if (key.isEmpty() && keyFile.isEmpty()) {
             return null;
         }

@@ -1,6 +1,5 @@
 package at.yawk.weatheragent;
 
-import io.micronaut.context.annotation.Value;
 import io.micronaut.core.annotation.Nullable;
 import io.micronaut.http.HttpRequest;
 import io.micronaut.http.HttpResponse;
@@ -8,7 +7,6 @@ import io.micronaut.http.HttpStatus;
 import io.micronaut.http.annotation.RequestFilter;
 import io.micronaut.http.annotation.ServerFilter;
 import java.net.URI;
-import java.util.Arrays;
 import java.util.Locale;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -22,8 +20,8 @@ import java.util.stream.Collectors;
 public final class McpHostFilter {
     private final Set<String> allowed;
 
-    public McpHostFilter(@Value("${weather.allowed-hosts}") String allowedHosts) {
-        this.allowed = Arrays.stream(allowedHosts.split(","))
+    public McpHostFilter(McpAccessConfig config) {
+        this.allowed = config.allowedHosts().stream()
             .map(String::trim)
             .filter(s -> !s.isEmpty())
             .map(s -> s.toLowerCase(Locale.ROOT))

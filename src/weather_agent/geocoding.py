@@ -1,9 +1,7 @@
-from typing import Annotated
-
 from jakarta.inject import Singleton
-from micronaut.context.annotation import Value
 from weather_core.geocode import Geocoder
 
+from .config import GeocoderConfig
 from .http_fetcher import Fetchers
 
 
@@ -11,15 +9,10 @@ from .http_fetcher import Fetchers
 class GeocodeService:
     """Builds the Nominatim geocoder from configuration; tools call into `geocoder`."""
 
-    def __init__(self,
-                 fetchers: Fetchers,
-                 base_url: Annotated[str, Value("${weather.geocoder.url:`https://nominatim.openstreetmap.org`}")],
-                 # Nominatim's policy asks for a User-Agent that identifies the application.
-                 user_agent: Annotated[str, Value("${weather.geocoder.user-agent:`weather-agent/0.1 (+https://github.com/yawkat/weather-agent)`}")],
-                 accept_language: Annotated[str, Value("${weather.geocoder.accept-language:en}")],
-                 timeout_s: Annotated[float, Value("${weather.geocoder.timeout-seconds:10}")]):
-        # Requests hold the geocoder's one-at-a-time lock, so fail fast: at most two attempts of timeout_s each,
-        # plus 1 s backoff.
+    def __init__(self, fetchers: Fetchers, config: GeocoderConfig):
+        # Requests hold the geocoder's one-at-a-time lock, so fail fast: at most two attempts of `timeout_seconds`
+        # each, plus 1 s backoff.
         self.geocoder = Geocoder(
-            lambda url: fetchers.nominatim.get(url, user_agent=user_agent, timeout_s=timeout_s, attempts=2), base_url,
-            accept_language=accept_language)
+            lambda url: fetchers.nominatim.get(url, user_agent=config.user_agent, timeout_s=config.timeout_seconds,
+                                               attempts=2),
+            config.url, accept_language=config.accept_language)

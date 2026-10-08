@@ -43,7 +43,7 @@
 13. Java exceptions raised into Python are not caught by `except Exception`, only by `except BaseException`.
 14. `@Tool`/`@ToolArg` arguments must be literals; string concatenation is rejected.
 15. Not Pyronaut: the JDK truststore lacks the HARICA root that signs data.ecmwf.int, so the HTTP client trusts
-    the system bundle (`micronaut.certificate.file.system-ca` + `ssl.trust-name`). Micronaut's `PemParser`
+    the system bundle (`micronaut.certificate.file.system` + `ssl.trust-name`). Micronaut's `PemParser`
     rejects the label lines between certificates in distro bundles, so the dev shell writes a cleaned copy.
 16. `java.type("byte[]")` is rejected by the host-class filter (array names don't match package prefixes, and
     listing `byte[]` doesn't help); use the default `ByteBuffer` body and `toByteArray()`.

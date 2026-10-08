@@ -127,7 +127,7 @@
             mkdir -p var
             sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' \
               ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt > var/ca-certificates.pem
-            export WEATHER_CA_BUNDLE="$PWD/var/ca-certificates.pem"
+            export MICRONAUT_CERTIFICATE_FILE_SYSTEM_PATH="$PWD/var/ca-certificates.pem"
             # Regenerable state: keep it out of restic backups too.
             for d in .venv __pyronaut__; do
               [ -d "$d" ] && touch "$d/.nobackup"

@@ -23,7 +23,7 @@ invalid key stops startup (the filter is created eagerly). Set a key on any inst
 
 ## Network exposure
 
-- The server binds to `127.0.0.1` by default. Set `WEATHER_BIND_HOST` to a VPN/LAN address only when needed; a
+- The server binds to `127.0.0.1` by default. Set `MICRONAUT_SERVER_HOST` to a VPN/LAN address only when needed; a
   reverse proxy in front is preferred.
 - `/mcp` only accepts requests whose `Host` (and `Origin`, if present) is listed in `WEATHER_ALLOWED_HOSTS`
   (default `localhost,127.0.0.1,::1`), which blocks DNS rebinding from browsers (`McpHostFilter`). Add the

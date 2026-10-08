@@ -154,6 +154,47 @@ def test_prefetch_without_budget_stops_startup():
     _start(**{"weather.download.max-mb-per-hour": "8000", "weather.prefetch.enabled": "false"})
 
 
+def test_settings_from_environment(tmp_path):
+    """Deployments set `weather.*` through environment variables; lists come as comma-separated values."""
+    import java
+
+    from at.yawk.weatheragent import McpAccessConfig
+    from weather_agent.config import EcmwfConfig, GeocoderConfig, PrefetchConfig, WeatherConfig
+    from weather_agent.forecast_service import ForecastService
+
+    PropertySource = java.type("io.micronaut.context.env.PropertySource")
+    env = java.type("java.util.HashMap")()
+    env.put("WEATHER_ALLOWED_HOSTS", "localhost,weather.test")
+    env.put("WEATHER_CACHE_DIR", str(tmp_path))
+    env.put("WEATHER_ECMWF_MIRRORS", "https://mirror.test, https://other.test,")
+    env.put("WEATHER_PREFETCH_FULL_MODELS", "icon-d2-eps")
+    env.put("WEATHER_GEOCODER_TIMEOUT_SECONDS", "2.5")
+    source = PropertySource.of("test-env", env, PropertySource.PropertyConvention.ENVIRONMENT_VARIABLE,
+                               PropertySource.Origin.of("test env"))
+    context = java.type("io.micronaut.context.ApplicationContext").builder().environments("test") \
+        .propertySources(source).start()
+    try:
+        assert list(context.getBean(McpAccessConfig).allowedHosts()) == ["localhost", "weather.test"]
+        assert context.getBean(WeatherConfig).cache_dir == str(tmp_path)
+        assert len(context.getBean(EcmwfConfig).mirrors) == 3  # split as is; ForecastService cleans up
+        ecmwf = next(s for s in context.getBean(ForecastService).forecaster.sources if s.name.startswith("ecmwf"))
+        assert ecmwf.hosts.bases == ["https://data.ecmwf.int/forecasts", "https://mirror.test", "https://other.test"]
+        assert list(context.getBean(PrefetchConfig).full_models) == ["icon-d2-eps"]
+        assert list(context.getBean(PrefetchConfig).models) == ["ecmwf-ens", "ecmwf-aifs-ens", "icon-d2-eps",
+                                                                "icon-eu-eps"]
+        assert context.getBean(GeocoderConfig).timeout_seconds == 2.5
+    finally:
+        context.close()
+
+
+def test_settings_defaults(my_context):
+    from at.yawk.weatheragent import McpAccessConfig
+
+    access = my_context.getBean(McpAccessConfig)
+    assert list(access.allowedHosts()) == ["localhost", "127.0.0.1", "::1"]
+    assert access.accessKey() is None and access.accessKeyFile() is None
+
+
 def test_chart_tool_links_its_view(my_context):
     tools = {t["name"]: t for t in _mcp(my_context, "tools/list", {})["tools"]}
     uri = tools["show_forecast"]["_meta"]["ui"]["resourceUri"]

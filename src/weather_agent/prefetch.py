@@ -1,10 +1,10 @@
 import logging
 import traceback
-from typing import Annotated
 
-from micronaut.context.annotation import Context, Value
+from micronaut.context.annotation import Context
 from micronaut.scheduling.annotation import Scheduled
 
+from .config import PrefetchConfig
 from .forecast_service import ForecastService
 
 log = logging.getLogger(__name__)
@@ -15,12 +15,11 @@ class PrefetchJob:
     """Keeps recently asked forecasts warm (weather_core.prefetch). Python can't start threads, so Micronaut's
     scheduler runs the passes."""
 
-    def __init__(self, service: ForecastService,
-                 enabled: Annotated[bool, Value("${weather.prefetch.enabled:true}")]):
+    def __init__(self, service: ForecastService, config: PrefetchConfig):
         self.prefetcher = service.prefetcher
-        self.enabled = enabled
+        self.enabled = config.enabled
         budget = self.prefetcher.budget
-        if enabled and budget is not None and self.prefetcher.keep_free_bytes >= budget.per_hour_bytes:
+        if self.enabled and budget is not None and self.prefetcher.keep_free_bytes >= budget.per_hour_bytes:
             # Every pass would be refused by the budget, and refusals are only logged at debug level.
             raise ValueError(f"weather.prefetch.keep-free-mb ({self.prefetcher.keep_free_bytes // 1_000_000}) must "
                              f"be below weather.download.max-mb-per-hour ({budget.per_hour_bytes // 1_000_000}), or "
