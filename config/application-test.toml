@@ -1,0 +1,3 @@
+# The `test` environment: tests mustn't download forecasts.
+[weather.prefetch]
+enabled = false

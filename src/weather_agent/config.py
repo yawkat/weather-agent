@@ -21,8 +21,10 @@ class WeatherConfig:
 @ConfigurationProperties("weather.ecmwf")
 @dataclass
 class EcmwfConfig:
-    base_url: str = "https://data.ecmwf.int/forecasts"
-    # Copies of `base_url` with the same layout, tried in order while it fails (weather_core.sources.mirrors).
+    # Google Cloud's copy of ECMWF open data: data.ecmwf.int throttles (HTTP 429) whenever a run is new. A run counts
+    # as published once it is here, minutes after ECMWF's own server.
+    base_url: str = "https://storage.googleapis.com/ecmwf-open-data"
+    # Hosts with the same layout, tried in order while `base_url` fails (weather_core.sources.mirrors).
     mirrors: list[str] | None = None
 
 
@@ -67,12 +69,9 @@ class PrefetchConfig:
     # Read by PrefetchJob's @Scheduled (as placeholders with the same defaults); declared here for the schema.
     interval: str = "10m"
     initial_delay: str = "2m"
+    # Models whose newest runs are kept fully warm, and for which variables (weather_core.prefetch).
     models: list[str] | None = None
-    max_entries: int = 64
-    ttl_hours: int = 48
-    keep_free_mb: int = 10000
-    full_models: list[str] | None = None
-    full_variables: list[str] | None = None
+    variables: list[str] | None = None
 
 
 def names(values: list[str] | None) -> list[str]:

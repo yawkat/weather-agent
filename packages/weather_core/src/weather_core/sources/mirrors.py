@@ -1,9 +1,9 @@
-"""Fallback between hosts that serve the same files, e.g. data.ecmwf.int and its cloud copies.
+"""Fallback between hosts that serve the same files, e.g. ECMWF open data on Google Cloud, data.ecmwf.int and S3.
 
-The origin comes first and is used whenever it works. A host that fails (after the fetcher's own retries, e.g. on
-HTTP 429) is skipped for a while, so a throttled origin isn't hammered by every query. Mirrors copy new runs a few
-minutes after the origin, so a 404 from the origin is final, but one from a mirror may just be lag: it isn't held
-against the mirror.
+The first host (the origin) comes first and is used whenever it works; it also decides what is published, so a 404
+from it is final. A host that fails (after the fetcher's own retries, e.g. on HTTP 429) is skipped for a while, so a
+throttled host isn't hammered by every query. The other hosts may copy new runs later than the origin, so a 404
+from one of them may just be lag: it isn't held against it.
 """
 
 import logging
