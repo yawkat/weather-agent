@@ -98,8 +98,9 @@ class Demand:
     """What one location must provide: variables, models (None = all) and time range (UTC minutes)."""
     variables: set[str] = field(default_factory=set)
     models: set[str] | None = field(default_factory=set)
-    start: int | None = None
+    start: int | None = None  # span of every window
     end: int | None = None
+    windows: set[tuple[int, int]] = field(default_factory=set)  # [start, end) of each time selection
     unbounded: bool = False
 
 
@@ -585,6 +586,7 @@ class _DemandWalk:
             else:
                 d.start = need.time[0] if d.start is None else min(d.start, need.time[0])
                 d.end = need.time[1] if d.end is None else max(d.end, need.time[1])
+                d.windows.add(need.time)
 
 
 # -- compiling --------------------------------------------------------------------------------------------------------

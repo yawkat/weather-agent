@@ -1,11 +1,12 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated
 
 from jakarta.inject import Singleton
 from micronaut.context.annotation import Value
 from weather_core.budget import DownloadBudget
 from weather_core.forecast import Forecaster
+from weather_core.prefetch import Prefetcher, WarmSet
 from weather_core.sources.dwd import ICON_D2_EPS, ICON_D2_RUC_EPS, ICON_EU_EPS, DwdIconSource
 from weather_core.sources.ecmwf import AIFS_ENS, IFS_ENS, EcmwfSource
 from weather_core.sources.mirrors import Mirrors
@@ -33,7 +34,14 @@ class ForecastService:
                  memory_mb: Annotated[int, Value("${weather.query.memory-mb:1024}")],
                  timeout_ms: Annotated[int, Value("${weather.query.timeout-ms:15000}")],
                  max_rows: Annotated[int, Value("${weather.query.max-rows:500}")],
-                 max_concurrent: Annotated[int, Value("${weather.query.max-concurrent:4}")]):
+                 max_concurrent: Annotated[int, Value("${weather.query.max-concurrent:4}")],
+                 # RUC-EPS isn't kept warm: a new run every hour, and only worth it for the next few hours.
+                 prefetch_models: Annotated[str, Value("${weather.prefetch.models:ecmwf-ens,ecmwf-aifs-ens,icon-d2-eps,icon-eu-eps}")],
+                 prefetch_max_entries: Annotated[int, Value("${weather.prefetch.max-entries:64}")],
+                 prefetch_ttl_hours: Annotated[int, Value("${weather.prefetch.ttl-hours:48}")],
+                 prefetch_keep_free_mb: Annotated[int, Value("${weather.prefetch.keep-free-mb:10000}")],
+                 prefetch_full_models: Annotated[str, Value("${weather.prefetch.full-models:}")],
+                 prefetch_full_variables: Annotated[str, Value("${weather.prefetch.full-variables:`precip,t2m,td2m,wind,gust,cloud`}")]):
         decoder = JavaDecoder()
         store = FieldStore(cache_dir)
         budget = DownloadBudget(max_mb_per_query * 1_000_000, max_mb_per_hour * 1_000_000)
@@ -50,6 +58,15 @@ class ForecastService:
                             budget=budget)
               for model in (ICON_D2_RUC_EPS, ICON_D2_EPS, ICON_EU_EPS)),
         ]
+
+        def names(text: str) -> list[str]:
+            return [name.strip() for name in text.split(",") if name.strip()]
+
+        warm = WarmSet(names(prefetch_models), max_entries=prefetch_max_entries,
+                       ttl=timedelta(hours=prefetch_ttl_hours))
         self.forecaster = Forecaster(sources, default_tz=default_tz, budget=budget, max_concurrent=max_concurrent,
                                      eval_bytes=memory_mb * 2**20, eval_timeout_s=timeout_ms / 1000,
-                                     max_rows=max_rows)
+                                     max_rows=max_rows, warm=warm)
+        self.prefetcher = Prefetcher(sources, warm, budget, keep_free_bytes=prefetch_keep_free_mb * 1_000_000,
+                                     full_models=names(prefetch_full_models),
+                                     full_variables=names(prefetch_full_variables))

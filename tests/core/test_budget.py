@@ -40,3 +40,15 @@ def test_settling_replaces_the_estimate():
         budget.reserve(1)
     now[0] = 3601.0  # everything ages out together with its reservation
     budget.reserve(100)
+
+
+def test_background_queries_leave_part_of_the_hourly_limit_free():
+    budget = DownloadBudget(per_request_bytes=100, per_hour_bytes=250)
+    with budget.query(keep_free_bytes=100):
+        budget.reserve(100)
+    with budget.query(keep_free_bytes=100):
+        with pytest.raises(SourceError, match="hourly"):
+            budget.reserve(51)
+        budget.reserve(50)
+    with budget.query():  # interactive queries may use the rest
+        budget.reserve(100)

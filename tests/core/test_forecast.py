@@ -86,6 +86,24 @@ def test_sources_of_one_query_share_the_per_query_download_limit():
     assert [m["model"] for m in f.forecast(DRY)["models"]] == ["a"]
 
 
+def test_two_windows_read_only_their_hours():
+    class Recording(Synthetic):
+        def prepare(self, query, variables):
+            self.query = query
+            return super().prepare(query, variables)
+
+    source = Recording()
+    point = 'forecast().interp(lat=50.0, lon=7.0)'
+    answer = forecaster(source).forecast(
+        f'{{"sat": {point}.sel(time=slice("2026-10-08T10:00", "2026-10-08T12:00")).precip.sum("time").mean("member"), '
+        f'"sun": {point}.sel(time=slice("2026-10-09T10:00", "2026-10-09T12:00")).t2m.max("time").mean("member")}}')
+    assert len(source.query.hours) == 26  # one axis from the first window's start to the second's end
+    assert source.query.wanted.tolist() == [True] * 2 + [False] * 22 + [True] * 2
+    row = answer["result"]["rows"][0]
+    assert row[1] == pytest.approx(0.9)  # 2 h × the mean member's 0.45 mm/h
+    assert row[2] == pytest.approx(10 + 0.5 * 4.5 + 0.1 * 59)  # +59 h: the second window's last hour
+
+
 def test_failing_source_does_not_fail_the_answer():
     answer = forecaster(Broken(), Synthetic()).forecast(DRY)
     assert by_model(answer) == {"synthetic": 0.3}

@@ -113,6 +113,9 @@ class EcmwfSource:
     def describe(self) -> dict:
         return {"resolution": self.model.resolution, "note": self.model.note}
 
+    def max_lead_hours(self) -> int:
+        return self.model.steps(datetime(2000, 1, 1, self.model.long_runs[0]))[-1]
+
     def provides(self) -> set[str]:
         base = {name for name, (param, _) in PARAMS.items() if param in self.model.params}
         return {name for name, needs in NEEDS.items() if needs <= base}
@@ -234,7 +237,28 @@ class EcmwfSource:
     def samples(self, query: Query, variables: Collection[str]) -> SourceSamples:
         return self.prepare(query, variables).samples()
 
+    def fetch(self, query: Query, variables: Collection[str]) -> int:
+        """Download (into the store) what `prepare` would need, without loading it; bytes downloaded."""
+        return self._fetch(query, variables)[-1]
+
     def prepare(self, query: Query, variables: Collection[str]) -> Prepared:
+        run, steps, interp, needed, unavailable, downloaded = self._fetch(query, variables)
+        base_per_step: dict[str, dict[int, np.ndarray]] = {}
+        for name, idxs in needed.items():
+            param, kind = PARAMS[name]
+            per_step = {}
+            for i in sorted(idxs):
+                current = interp.apply(self._load(run, param, steps[i]))
+                if kind == "accum":
+                    previous = interp.apply(self._load(run, param, steps[i - 1]))
+                    current = np.maximum(current - previous, 0.0) / (steps[i] - steps[i - 1])
+                per_step[i] = _convert(name, current, self.model)
+            base_per_step[name] = per_step
+        info = SourceInfo(self.name, self.model.model, "ECMWF", run, self.model.members)
+        return Prepared(query, run, steps, base_per_step, INTERVAL_VARS, unavailable, info, downloaded,
+                        lambda times: attribution(info, times, run))
+
+    def _fetch(self, query: Query, variables: Collection[str]):
         provided = self.provides()
         usable = [v for v in variables if v in provided]
         base_vars = set().union(*(NEEDS[v] for v in usable)) if usable else set()
@@ -261,21 +285,7 @@ class EcmwfSource:
                     raise
                 base_vars -= lost
                 unavailable |= {v for v in variables if NEEDS.get(v, set()) & lost}
-
-        base_per_step: dict[str, dict[int, np.ndarray]] = {}
-        for name, idxs in needed.items():
-            param, kind = PARAMS[name]
-            per_step = {}
-            for i in sorted(idxs):
-                current = interp.apply(self._load(run, param, steps[i]))
-                if kind == "accum":
-                    previous = interp.apply(self._load(run, param, steps[i - 1]))
-                    current = np.maximum(current - previous, 0.0) / (steps[i] - steps[i - 1])
-                per_step[i] = _convert(name, current, self.model)
-            base_per_step[name] = per_step
-        info = SourceInfo(self.name, self.model.model, "ECMWF", run, self.model.members)
-        return Prepared(query, run, steps, base_per_step, INTERVAL_VARS, unavailable, info, downloaded,
-                        lambda times: attribution(info, times, run))
+        return run, steps, interp, needed, unavailable, downloaded
 
     @staticmethod
     def _step_indices(name: str, sampling) -> set[int]:

@@ -138,6 +138,22 @@ def test_bad_access_key_stops_startup():
         ApplicationContext.builder().environments("test").properties(properties).start().close()
 
 
+def _start(**settings):
+    import java
+
+    ApplicationContext = java.type("io.micronaut.context.ApplicationContext")
+    properties = java.type("java.util.HashMap")()
+    for key, value in settings.items():
+        properties.put(key, value)
+    ApplicationContext.builder().environments("test").properties(properties).start().close()
+
+
+def test_prefetch_without_budget_stops_startup():
+    with pytest.raises(BaseException, match="keep-free-mb .* must be below"):
+        _start(**{"weather.download.max-mb-per-hour": "8000"})
+    _start(**{"weather.download.max-mb-per-hour": "8000", "weather.prefetch.enabled": "false"})
+
+
 def test_chart_tool_links_its_view(my_context):
     tools = {t["name"]: t for t in _mcp(my_context, "tools/list", {})["tools"]}
     uri = tools["show_forecast"]["_meta"]["ui"]["resourceUri"]
