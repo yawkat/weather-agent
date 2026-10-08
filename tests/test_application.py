@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from pyronaut.test import *
@@ -198,13 +200,18 @@ def test_settings_defaults(my_context):
 def test_chart_tool_links_its_view(my_context):
     tools = {t["name"]: t for t in _mcp(my_context, "tools/list", {})["tools"]}
     uri = tools["show_forecast"]["_meta"]["ui"]["resourceUri"]
-    assert uri == "ui://weather-agent/forecast.html"
+    # Versioned by content, so clients that cache views by URI see a changed view.
+    assert re.fullmatch(r"ui://weather-agent/forecast-[0-9a-f]{12}\.html", uri)
+    assert tools["show_forecast"]["_meta"]["ui/resourceUri"] == uri
     assert tools["show_forecast"]["inputSchema"]["required"] == ["query"]
     assert "forecast" in tools  # annotated tools are still there
 
     contents = _mcp(my_context, "resources/read", {"uri": uri})["contents"][0]
     assert contents["mimeType"] == "text/html;profile=mcp-app"
     assert "ui/initialize" in contents["text"]
+    # The plain URI still serves the view, for clients with an older tool list.
+    plain = _mcp(my_context, "resources/read", {"uri": "ui://weather-agent/forecast.html"})["contents"][0]
+    assert plain["text"] == contents["text"]
 
 
 def test_chart_tool_returns_answer_and_chart(my_context):

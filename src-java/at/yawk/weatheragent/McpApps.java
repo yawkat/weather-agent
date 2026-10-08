@@ -11,6 +11,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
@@ -22,6 +25,10 @@ import java.util.Map;
  * beans are added to the server here once it exists. They aren't registered as SDK specification beans because
  * Micronaut's annotation processing of the SDK's Jackson-annotated types fails under Pyronaut (missing
  * micronaut-serde classes on the processor path).
+ * <p>
+ * Clients cache views by URI (Claude keeps a view across deployments), so a changed view needs a new URI: each
+ * view is also served as {@code name-<hash>.html}, and tools link to that. The plain URI stays for clients that
+ * still have an older tool list.
  */
 @Singleton
 public final class McpApps implements BeanCreatedEventListener<McpStatelessSyncServer> {
@@ -39,7 +46,10 @@ public final class McpApps implements BeanCreatedEventListener<McpStatelessSyncS
     public McpStatelessSyncServer onCreated(BeanCreatedEvent<McpStatelessSyncServer> event) {
         McpStatelessSyncServer server = event.getBean();
         for (McpAppTool tool : tools) {
-            server.addTool(specification(tool));
+            String html = tool.view();
+            String uri = versionedUri(tool.viewUri(), html);
+            server.addResource(resource(tool, uri, html));
+            server.addTool(specification(tool, uri));
         }
         return server;
     }
@@ -56,8 +66,32 @@ public final class McpApps implements BeanCreatedEventListener<McpStatelessSyncS
         }
     }
 
-    private McpStatelessServerFeatures.SyncToolSpecification specification(McpAppTool app) {
-        String uri = app.viewUri();
+    /** {@code ui://app/view.html} → {@code ui://app/view-<hash of html>.html}. */
+    static String versionedUri(String uri, String html) {
+        byte[] digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256").digest(html.getBytes(StandardCharsets.UTF_8));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+        String hash = HexFormat.of().formatHex(digest, 0, 6);
+        int dot = uri.lastIndexOf('.');
+        return dot > uri.lastIndexOf('/') ? uri.substring(0, dot) + "-" + hash + uri.substring(dot)
+            : uri + "-" + hash;
+    }
+
+    private static McpStatelessServerFeatures.SyncResourceSpecification resource(McpAppTool app, String uri,
+                                                                                 String html) {
+        McpSchema.Resource resource = McpSchema.Resource.builder(uri, app.name() + "-view")
+            .title(app.title())
+            .mimeType(MIME_TYPE)
+            .build();
+        McpSchema.ReadResourceResult contents = new McpSchema.ReadResourceResult(
+            List.of(new McpSchema.TextResourceContents(uri, MIME_TYPE, html, null)));
+        return new McpStatelessServerFeatures.SyncResourceSpecification(resource, (context, request) -> contents);
+    }
+
+    private McpStatelessServerFeatures.SyncToolSpecification specification(McpAppTool app, String uri) {
         McpSchema.Tool tool = McpSchema.Tool.builder(app.name(), json, app.inputSchema())
             .title(app.title())
             .description(app.description())
