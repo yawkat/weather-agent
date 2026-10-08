@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 import traceback
 import uuid
 from collections.abc import Callable
@@ -8,6 +9,7 @@ from typing import Annotated
 from jakarta.inject import Singleton
 from micronaut.mcp.annotations import Tool, ToolArg
 from weather_core.expr.help import describe_language
+from weather_core.expr.redact import Redacted
 from weather_core.sources.base import SourceError
 
 from .forecast_service import ForecastService
@@ -18,18 +20,41 @@ log = logging.getLogger(__name__)
 # Annotation arguments must be literals: Pyronaut reads them from source without evaluating.
 
 
-def _run(fn: Callable[[], dict]) -> str:
+def _run(fn: Callable[[], dict], call: str, redacted: Redacted | None = None,
+         summarize: Callable[[dict], str] = lambda r: "") -> str:
+    """Run a tool and log the call. `call` and `summarize` must not locate anyone: the log shows what agents ask,
+    not where. Error messages may quote locations, so only their type and the (redacted) node they point to are
+    logged."""
+    started = time.monotonic()
+    outcome = "failed"
     try:
-        return json.dumps(fn(), ensure_ascii=False)
+        result = fn()
+        outcome = f"ok{summarize(result)}"
+        return json.dumps(result, ensure_ascii=False)
     except (SourceError, ValueError) as e:  # includes QueryError/ExprError: bad queries, timeouts, limits
+        node = redacted.at(getattr(e, "span", None)) if redacted is not None else None
+        outcome = f"rejected ({type(e).__name__}{f' at {node}' if node else ''})"
         return json.dumps({"error": str(e)}, ensure_ascii=False)
     except BaseException as e:  # Java exceptions surface here as foreign exceptions, not Python Exceptions
         if isinstance(e, (KeyboardInterrupt, SystemExit, GeneratorExit)):
             raise
         reference = uuid.uuid4().hex[:8]
+        outcome = f"internal error [{reference}]"
         log.error("tool failed [%s]: %s: %s\n%s", reference, type(e).__name__, e, traceback.format_exc())
         # Details stay in the server log; the client gets a reference to quote.
         return json.dumps({"error": f"internal error (reference {reference})"}, ensure_ascii=False)
+    finally:
+        log.info("%s: %s in %.1f s", call, outcome, time.monotonic() - started)
+
+
+def _forecast_summary(result: dict) -> str:
+    models = ", ".join(m.get("model", "?") for m in result.get("models", []))
+    out = f", models [{models}], {result.get('downloaded_mb', 0)} MB downloaded"
+    if result.get("unavailable_sources"):
+        out += f", unavailable {[s['source'] for s in result['unavailable_sources']]}"
+    if result.get("warnings"):
+        out += f", {len(result['warnings'])} warning(s)"  # their text may quote locations
+    return out
 
 
 @Singleton
@@ -40,6 +65,7 @@ class ForecastTools:
     @Tool(description="Reference for forecast queries: the dataset, its dimensions and variables, selecting "
                       "locations and times, reductions, and examples. Read this before the first forecast query.")
     def weather_query_help(self) -> str:
+        log.info("weather_query_help")
         return describe_language()
 
     @Tool(description="Ensemble weather forecast queried with a subset of xarray (Python syntax) over one dataset, "
@@ -53,7 +79,9 @@ class ForecastTools:
     def forecast(self,
                  query: Annotated[str, ToolArg(description="The query; see weather_query_help")],
                  gpx: Annotated[str | None, ToolArg(description="Optional GPX document; the query refers to it as route(gpx, start=…, …)")] = None) -> str:
-        return _run(lambda: self.forecaster.forecast(query, gpx=gpx))
+        redacted = Redacted(query, keep=(s.name for s in self.forecaster.sources))
+        call = f"forecast {redacted}" + (f" (gpx: {len(gpx)} characters)" if gpx is not None else "")
+        return _run(lambda: self.forecaster.forecast(query, gpx=gpx), call, redacted, _forecast_summary)
 
     @Tool(description="Summarise a route from GPX text or a polyline: length, bounding box, duration at a speed, "
                       "and a compact encoded polyline to use in forecast queries (route(polyline=…)) instead of the full GPX.")
@@ -61,7 +89,10 @@ class ForecastTools:
                        polyline: Annotated[str | None, ToolArg(description="Encoded polyline (precision 5)")] = None,
                        gpx: Annotated[str | None, ToolArg(description="GPX document text")] = None,
                        speed_kmh: Annotated[float | None, ToolArg(description="Average speed in km/h")] = None) -> str:
-        return _run(lambda: self.forecaster.describe_route(polyline=polyline, gpx=gpx, speed_kmh=speed_kmh))
+        given = [f"{name}: {len(value)} characters" for name, value in (("polyline", polyline), ("gpx", gpx))
+                 if value is not None]
+        call = f"describe_route ({', '.join(given) or 'no route'}, speed {speed_kmh} km/h)"
+        return _run(lambda: self.forecaster.describe_route(polyline=polyline, gpx=gpx, speed_kmh=speed_kmh), call)
 
 
 @Singleton
@@ -77,4 +108,6 @@ class PlaceTools:
                       "the attribution when showing results.")
     def resolve_place(self,
                       query: Annotated[str, ToolArg(description="Place name(s), e.g. 'Cologne, Germany; Bonn, Germany'")]) -> str:
-        return _run(lambda: self.geocoder.resolve_many(query))
+        names = [n for n in query.split(";") if n.strip()]
+        return _run(lambda: self.geocoder.resolve_many(query), f"resolve_place ({len(names)} name(s))",
+                    summarize=lambda r: f", {sum('error' in p for p in r['results'])} not found")
