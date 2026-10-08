@@ -18,6 +18,10 @@ for path in list(pyronaut.rglob("*.lock")) + list(m2.rglob("*.lastUpdated")) + l
         m2.rglob("resolver-status.properties")):
     path.unlink()
 
+# Maven Central's prefix lists for the resolver's repository filter. Central republishes them whenever a new groupId
+# appears, so they'd break the hash within days. Offline, the resolver doesn't filter without them.
+shutil.rmtree(m2 / "repository" / ".meta", ignore_errors=True)
+
 # Editor stubs aren't needed for building, and their generation isn't deterministic (parameter names of overloads
 # vary between runs).
 shutil.rmtree(pyronaut / "ide-stubs", ignore_errors=True)
