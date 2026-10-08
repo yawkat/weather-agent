@@ -43,6 +43,7 @@ invalid key stops startup (the filter is created eagerly). Set a key on any inst
 | Area | span ≤ 30° in latitude and longitude, ≤ 500 grid points at 10 km spacing (spacing chosen before allocating) | `geometry.py`, `forecast.py` |
 | Place names | ≤ 10 per call, ≤ 200 characters each; Nominatim requests serialised and ≥ 1 s apart, results (hits and misses) cached in memory, LRU of 10,000 names | `geocode.py` |
 | Downloads | `weather.download.max-mb-per-query` (4,000, all models of a query together) and `…-per-hour` (20,000), checked against estimates before downloading and settled to actual sizes | `budget.py`, `forecast.py` |
+| Prefetch (background) | Only queries that got an answer are kept warm: ≤ `weather.prefetch.max-entries` (64) windows of ≤ 16 days, dropped after `…ttl-hours` (48) or once past, in memory only; each pass goes through the per-query limit per window and leaves `…keep-free-mb` (10,000) of the hourly limit to interactive queries | `prefetch.py` |
 
 Route samples read only their own grid point, so memory is linear in route length.
 

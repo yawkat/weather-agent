@@ -330,7 +330,30 @@ class DwdIconSource:
     def samples(self, query: Query, variables: Collection[str]) -> SourceSamples:
         return self.prepare(query, variables).samples()
 
+    def fetch(self, query: Query, variables: Collection[str]) -> int:
+        """Download (into the store) what `prepare` would need, without loading it; bytes downloaded."""
+        return self._fetch(query, variables)[-1]
+
     def prepare(self, query: Query, variables: Collection[str]) -> Prepared:
+        run, steps, interp, needed, unavailable, downloaded = self._fetch(query, variables)
+        base_per_step: dict[str, dict[int, np.ndarray]] = {}
+        for name, idxs in needed.items():
+            kind = PARAMS[name][1]
+            per_step = {}
+            for i in sorted(idxs):
+                total = 0.0
+                for param in self._params(name):
+                    current = interp.apply(self._load(run, param, steps[i]))
+                    if kind in ("accum", "avg"):
+                        current = self._rate(run, param, kind, steps[i - 1], steps[i], current, interp)
+                    total = total + current
+                per_step[i] = _convert(name, total)
+            base_per_step[name] = per_step
+        info = SourceInfo(self.name, self.model.model, "DWD", run, self.model.members)
+        return Prepared(query, run, steps, base_per_step, INTERVAL_VARS, unavailable, info, downloaded,
+                        lambda times: attribution(info, times, run))
+
+    def _fetch(self, query: Query, variables: Collection[str]):
         provided = self.provides()
         usable = [v for v in variables if v in provided]
         base_vars = set().union(*(self._needs(v) for v in usable)) if usable else set()
@@ -353,23 +376,7 @@ class DwdIconSource:
                         continue  # totals and means since the start are zero there
                     by_step.setdefault(steps[j], set()).update(self._params(name))
         downloaded += self._ensure_all(run, by_step)
-
-        base_per_step: dict[str, dict[int, np.ndarray]] = {}
-        for name, idxs in needed.items():
-            kind = PARAMS[name][1]
-            per_step = {}
-            for i in sorted(idxs):
-                total = 0.0
-                for param in self._params(name):
-                    current = interp.apply(self._load(run, param, steps[i]))
-                    if kind in ("accum", "avg"):
-                        current = self._rate(run, param, kind, steps[i - 1], steps[i], current, interp)
-                    total = total + current
-                per_step[i] = _convert(name, total)
-            base_per_step[name] = per_step
-        info = SourceInfo(self.name, self.model.model, "DWD", run, self.model.members)
-        return Prepared(query, run, steps, base_per_step, INTERVAL_VARS, unavailable, info, downloaded,
-                        lambda times: attribution(info, times, run))
+        return run, steps, interp, needed, unavailable, downloaded
 
     def _rate(self, run: datetime, param: str, kind: str, previous_step: int, step: int, current: np.ndarray,
               interp) -> np.ndarray:

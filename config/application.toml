@@ -35,6 +35,14 @@ format = 'PEM'
 # AWS's S3 bucket often answers 503 SlowDown while everyone fetches a new run. They copy new runs minutes late.
 mirrors = '${WEATHER_ECMWF_MIRRORS:`https://storage.googleapis.com/ecmwf-open-data,https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com`}'
 
+[weather.prefetch]
+# Every `interval`, fetch from each model's newest run what queries answered in the last `ttl-hours` needed (at most
+# `max-entries` model/place/time windows, in memory only), so repeat questions don't wait for downloads
+# (weather_core.prefetch). Passes leave `keep-free-mb` of the hourly download budget to interactive queries.
+# RUC-EPS isn't in `models`: a new run every hour, for questions about the next few hours.
+enabled = '${WEATHER_PREFETCH:true}'
+interval = '10m'
+
 # One client per upstream (http_fetcher.Fetchers). Request URLs are absolute, so `url` is only a default.
 [micronaut.http.services.ecmwf]
 url = 'https://data.ecmwf.int'

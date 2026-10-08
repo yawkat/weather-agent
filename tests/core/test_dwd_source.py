@@ -159,6 +159,21 @@ def test_cached_fields_are_not_downloaded_again(tmp_path):
     assert again.server.urls == [] and result.bytes_downloaded == 0
 
 
+def test_fetch_downloads_what_prepare_reads(tmp_path):
+    source = make(tmp_path)
+    assert source.fetch(hours(24, 2), ["precip", "t2m"]) > 0
+    count = len(source.server.urls)
+    assert source.prepare(hours(24, 2), ["precip", "t2m"]).bytes_downloaded == 0
+    assert len(source.server.urls) == count
+
+
+def test_fetch_rejects_points_outside_the_domain(tmp_path):
+    source = make(tmp_path)
+    with pytest.raises(OutsideRegion):
+        source.fetch(hours(3, 1, lon=9.0), ["precip"])
+    assert all("/CLAT/" in u or "/CLON/" in u for u in source.server.urls)
+
+
 def test_newest_run_missing_steps_falls_back_to_older_run(tmp_path):
     # RUC: the 14z run has uploaded up to +5 h, the 13z run is complete.
     newest = RUN + timedelta(hours=2)

@@ -32,14 +32,18 @@ class DownloadBudget:
         self._lock = threading.Lock()
         self._recent: deque[Reservation] = deque()
         self._query: ContextVar[list[int] | None] = ContextVar("download_query", default=None)
+        self._keep_free: ContextVar[int] = ContextVar("download_keep_free", default=0)
 
     @contextmanager
-    def query(self) -> Iterator[None]:
-        """Scope of one query: its reservations share the per-query limit."""
+    def query(self, keep_free_bytes: int = 0) -> Iterator[None]:
+        """Scope of one query: its reservations share the per-query limit. `keep_free_bytes` of the hourly limit
+        stay unused by it (background work leaves room for interactive queries)."""
         token = self._query.set([0])
+        keep_free = self._keep_free.set(keep_free_bytes)
         try:
             yield
         finally:
+            self._keep_free.reset(keep_free)
             self._query.reset(token)
 
     def reserve(self, nbytes: int) -> Reservation:
@@ -54,7 +58,7 @@ class DownloadBudget:
         with self._lock:
             now = self._prune()
             used = sum(r.nbytes for r in self._recent)
-            if used + nbytes > self.per_hour_bytes:
+            if used + nbytes > self.per_hour_bytes - self._keep_free.get():
                 raise SourceError(f"hourly download limit reached ({used / 1e6:.0f} of "
                                   f"{self.per_hour_bytes / 1e6:.0f} MB used); cached data is still served")
             reservation = Reservation(now, nbytes, used_by_query)
