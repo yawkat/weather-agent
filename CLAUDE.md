@@ -9,7 +9,9 @@ interprets itself (`weather_core/expr/`, documented in `docs/query-language.md`)
 - `packages/weather_core/`: pure-Python engine (sources, sampling, geometry, query language). It's a uv workspace
   member installed editable into the venv, because the Pyronaut processor would otherwise generate Java for every
   class (pyronaut#331).
-- `src/weather_agent/`: Micronaut/MCP glue (tools, fetcher on Micronaut's HTTP client).
+- `src/weather_agent/`: Micronaut/MCP glue (tools, fetcher on Micronaut's HTTP client). `apps.py`: `show_forecast`,
+  which also shows the answer as an interactive chart (MCP Apps; view in `config/mcp-apps/forecast.html`, protocol
+  side in `src-java/…/McpApps.java`).
 - `src-java/at/yawk/weatheragent/`: Java helpers where performance or interop needs them (GRIB decoding,
   Host/Origin and secret-path filters, GraalPy native access).
 - `nix/`: pure Nix build (venv from `uv.lock`, downloads as a fixed-output derivation, offline JAR build,

@@ -49,6 +49,13 @@
     listing `byte[]` doesn't help); use the default `ByteBuffer` body and `toByteArray()`.
 17. Pyronaut maps Python `datetime` to naive Java types and rejects aware values ("Aware datetime.datetime values
     cannot be converted to a naive Java type"); timestamps are stored as naive UTC.
+18. Processing never finishes (100 % CPU in `IncrementalCompilation.matchesAnyType`) when a Java source declares an
+    anonymous class: its empty type name loops forever. Avoid anonymous classes in `src-java/` (e.g. no
+    `new TypeRef<>() {}`). https://github.com/micronaut-projects/micronaut-core/issues/13799
+19. MCP Apps tools (`McpApps.java`): micronaut-mcp's `@Tool` can't set the `_meta` that links a tool to its view.
+    Python beans implement the Java interface `McpAppTool`, and a listener adds them to the server once it exists.
+    Declaring SDK specification beans directly failed once in processing (`NoClassDefFoundError:
+    SerdeConfig$SerIgnored` from the serde processor); it didn't reproduce from a clean state, so the cause is open.
 
 ## GRIB decoding (spike 0.2): works, via netCDF-Java `edu.ucar:grib` 5.11.0
 

@@ -365,6 +365,10 @@ def format_time(utc_minutes, tz: tzinfo, flavour: str = "") -> str:
 
 # -- results --------------------------------------------------------------------------------------------------------
 
+class TooManyRows(ExprError):
+    """The answer is too long for a table (charts can still show it)."""
+
+
 def encode(value, typ: Type, ctx: Context, max_rows: int):
     """JSON for a result: scalars as numbers/booleans, arrays as tables with columns for their dimensions."""
     if isinstance(value, Rec):
@@ -392,7 +396,7 @@ def _table(fields: list, ctx: Context, max_rows: int) -> dict:
     sizes = [len(coords[d]) for d in dims]
     n_rows = int(np.prod(sizes))
     if n_rows > max_rows:
-        raise ExprError(f"the result has {n_rows} rows (limit {max_rows}): reduce a dimension "
+        raise TooManyRows(f"the result has {n_rows} rows (limit {max_rows}): reduce a dimension "
                         f"({', '.join(dims)}), resample time, or rank with top()")
     label_columns = [(i, name, values) for i, d in enumerate(dims) for name, values in _labels(d, coords[d], ctx)]
     value_columns = []
