@@ -18,6 +18,8 @@ let
   extraHashes = {
     "numpy-2.4.4-graalpy313-graalpy253_313_native-manylinux_2_27_x86_64.whl" =
       "sha256-lBbzL4XC5igoLzSKlNs9PVKB0ptgTNW+r+9p6Q8acQY=";
+    "numpy-2.4.4-graalpy313-graalpy253_313_native-manylinux_2_27_aarch64.whl" =
+      "sha256-Rf485DKh/16oWdr1t+lPqT6bghG3C2yTUB/DdbkGvUA=";
   };
 
   # Runtime closure of the root project: [project] dependencies only, not dependency groups (pytest).
@@ -44,11 +46,14 @@ let
 
   fileName = url: lib.last (lib.splitString "/" url);
 
+  # Machine name in the platform tags of the native wheels
+  wheelArch = stdenv.hostPlatform.uname.processor;
+
   pickWheel =
     pkg:
     let
       wheels = pkg.wheels or [ ];
-      native = lib.filter (w: lib.hasSuffix "manylinux_2_27_x86_64.whl" (fileName w.url)) wheels;
+      native = lib.filter (w: lib.hasSuffix "manylinux_2_27_${wheelArch}.whl" (fileName w.url)) wheels;
       pure = lib.filter (w: lib.hasSuffix "-none-any.whl" (fileName w.url)) wheels;
       wheel =
         if native != [ ] then
@@ -56,7 +61,7 @@ let
         else if pure != [ ] then
           lib.head pure
         else
-          throw "uv.lock: no linux x86_64 wheel for ${pkg.name}";
+          throw "uv.lock: no linux ${wheelArch} wheel for ${pkg.name}";
       name = fileName wheel.url;
     in
     fetchurl {
@@ -130,5 +135,8 @@ stdenv.mkDerivation {
 
   passthru.packages = map (p: "${p.name}==${p.version}") closure;
 
-  meta.platforms = [ "x86_64-linux" ];
+  meta.platforms = [
+    "x86_64-linux"
+    "aarch64-linux"
+  ];
 }
