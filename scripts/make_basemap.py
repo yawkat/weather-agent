@@ -15,7 +15,8 @@ its Douglas-Peucker significance (`.sig`: the largest simplification tolerance, 
 keeps the point; 255 = always), so the server simplifies a map to its scale by dropping points
 (weather_core.chart.basemap). Per feature: its first point (`.start`, plus the end), Natural Earth's min_zoom × 10
 (`.zoom`: the web map zoom level from which it's worth showing) and bounding box (`.box`: s, w, n, e). Areas
-(land, lakes) are cut into TILE-degree cells, so a map only reads the parts it overlaps. Places: `places.lat`,
+(land, lakes) are cut into TILE-degree cells, so a map only reads the parts it overlaps; their outlines, where
+drawn, come from line layers (`lake_shore`), which have no such cuts. Places: `places.lat`,
 `.lon`, `.pop`, and the names as one UTF-8 `\\n`-separated byte string (`places.names`), largest first.
 """
 
@@ -228,6 +229,8 @@ def main(directory: str) -> None:
     layers = {
         "land": areas(d, ["ne_10m_land"], lambda p: 0.0),
         "lake": areas(d, ["ne_10m_lakes", "ne_10m_lakes_europe"], zoom),
+        # Lake shores as lines: the outlines of the lake areas include the cuts between tiles and at the map edge.
+        "lake_shore": lines(d, ["ne_10m_lakes", "ne_10m_lakes_europe"], zoom),
         "coastline": lines(d, ["ne_10m_coastline"], lambda p: 0.0),
         "border": lines(d, ["ne_10m_admin_0_boundary_lines_land"], zoom),
         # Big rivers (Natural Earth's world layer, scalerank ≤ 6) are drawn wider.

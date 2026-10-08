@@ -125,7 +125,7 @@ def _map_bounds(values: list[rt.Arr]) -> tuple[float, float, float, float] | Non
 # The map under maps: Natural Earth 1:10m and GeoNames places, built by scripts/make_basemap.py.
 _MAP_SOURCE = "Natural Earth (public domain), GeoNames (CC BY 4.0)"
 _MAP_AREAS = ("land", "lake")
-_MAP_LINES = ("coastline", "border", "river_major", "river", "motorway", "road")
+_MAP_LINES = ("lake_shore", "coastline", "border", "river_major", "river", "motorway", "road")
 _MAP_WIDTH = 600  # drawing units of the view's maps; the map is simplified to about half of one
 _MAP_PLACES = 150  # largest places in the map; the view labels those that fit
 
@@ -140,7 +140,8 @@ def _basemap_data() -> dict[str, np.ndarray]:
 
 
 def basemap(south: float, west: float, north: float, east: float) -> dict:
-    """The map around a map's points: land and lakes as rings, coastlines, borders, rivers and roads as lines (each
+    """The map around a map's points: land and lakes as rings (cut at the box and between tiles, so only for
+    filling), lake shores, coastlines, borders, rivers and roads as lines (each
     a list of [lat, lon, lat, lon, …] in degrees), and the largest places ([lat, lon, name], largest first).
 
     Detail follows the map's scale, like a web map's zoom level: features Natural Earth shows from that zoom on,

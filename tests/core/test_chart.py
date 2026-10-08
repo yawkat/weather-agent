@@ -131,7 +131,7 @@ def test_basemap_is_clipped_to_the_map():
     m = basemap(49.5, 5.5, 51.5, 7.5)
     assert m["bounds"] == [49.0, 5.0, 52.0, 8.0]
     inside = lambda a, b: 49.0 <= a <= 52.0 and 5.0 <= b <= 8.0
-    for name in ("coastline", "border", "river_major", "river", "motorway", "road"):
+    for name in ("lake_shore", "coastline", "border", "river_major", "river", "motorway", "road"):
         for line in m[name]:
             # At most its ends reach beyond the box, so the line reaches the edge.
             assert len(line) >= 4 and all(inside(a, b) for a, b in zip(line[2:-2:2], line[3:-2:2]))
@@ -151,6 +151,16 @@ def test_basemap_shows_rivers_roads_and_towns_at_its_scale():
     assert europe["river_major"] and not europe["river"]
     assert len(europe["places"]) == 150 and "Paris" in [p[2] for p in europe["places"][:10]]
     assert len(json.dumps(europe)) < 600_000
+
+
+def test_lake_shores_have_no_cuts():
+    # Lake Peipus crosses the 27°E line between area tiles: its fill comes in two pieces, its shore doesn't run
+    # along the cut.
+    m = basemap(58.0, 26.5, 59.0, 28.0)
+    assert len(m["lake"]) >= 2 and m["lake_shore"]
+    for line in m["lake_shore"]:
+        lons = line[1::2]
+        assert not any(a == b == 27.0 for a, b in zip(lons, lons[1:]))
 
 
 def test_one_grid_coordinate_left_is_a_profile_not_a_map():
