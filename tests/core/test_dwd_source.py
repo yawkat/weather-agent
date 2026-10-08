@@ -234,7 +234,8 @@ def test_grid_download_is_budgeted_and_counted(tmp_path):
 def test_changed_grid_is_fetched_again(tmp_path):
     source = make(tmp_path)
     source.samples(hours(3, 1), ["t2m"])
-    source._grid_points += 1  # pretend DWD changed the grid since it was cached
+    grid, points = source._grid
+    source._grid = (grid, points + 1)  # pretend DWD changed the grid since it was cached
     with pytest.raises(SourceError, match="grid"):
         source.samples(hours(5, 1), ["t2m"])
     assert not (tmp_path / "_grids" / "icon-d2-eps.f32").exists()

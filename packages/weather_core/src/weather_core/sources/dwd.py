@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
@@ -120,8 +121,10 @@ class DwdIconSource:
         self.on_download = on_download
         self.budget = budget
         self._listings: dict[tuple[datetime, str], tuple[float, dict[int, int] | None]] = {}
-        self._grid: UnstructuredGrid | None = None
-        self._grid_points = 0  # field size the grid was built for
+        # Queries and prefetch passes run on several threads; guards `_listings` (never held for I/O).
+        self._lock = threading.Lock()
+        # The grid and the field size it was built for, replaced as one: another thread may drop it any time.
+        self._grid: tuple[UnstructuredGrid, int] | None = None
 
     @property
     def name(self) -> str:
@@ -165,7 +168,8 @@ class DwdIconSource:
         serve as the download estimate; members differ by about 1%.
         """
         key = (run, param)
-        cached = self._listings.get(key)
+        with self._lock:
+            cached = self._listings.get(key)
         complete = cached is not None and cached[1] is not None and len(cached[1]) == len(self.model.steps())
         if cached is not None and (complete or time.monotonic() - cached[0] < _LISTING_TTL):
             return cached[1] or {}
@@ -179,7 +183,8 @@ class DwdIconSource:
             listed = {int(step): int(size) for step, size in _LISTING.findall(body.decode(errors="replace"))}
             sizes = {step: max(size, sizes[step] if sizes else 0) for step, size in listed.items()
                      if step in published}
-        self._listings[key] = (time.monotonic(), sizes)
+        with self._lock:
+            self._listings[key] = (time.monotonic(), sizes)
         return sizes or {}
 
     # -- run discovery -------------------------------------------------------------------------------------------
@@ -194,8 +199,9 @@ class DwdIconSource:
     def find_run(self, query: Query, params: Collection[str]) -> datetime:
         """Newest run that covers the query and has published every needed step of every needed parameter."""
         candidates = self.candidate_runs()
-        for key in [k for k in self._listings if k[0] not in candidates]:
-            del self._listings[key]
+        with self._lock:
+            for key in [k for k in self._listings if k[0] not in candidates]:
+                del self._listings[key]
         steps = self.model.steps()
         probe = sorted(params) or ["T_2M"]
         def sampling(run):
@@ -215,18 +221,18 @@ class DwdIconSource:
         # Outside the per-source run directories, which the store evicts.
         return self.store.root / "_grids" / f"{self.name}.f32"
 
-    def _ensure_grid(self, run: datetime) -> int:
-        """Load the grid into `self._grid`, fetching it on first use; bytes downloaded."""
-        if self._grid is not None:
-            return 0
+    def _ensure_grid(self, run: datetime) -> tuple[UnstructuredGrid, int, int]:
+        """The grid and the field size it was built for, fetched on first use; and bytes downloaded."""
+        loaded = self._grid
+        if loaded is not None:
+            return *loaded, 0
         path = self._grid_path()
         written = self._fetch_grid(run, path) if not path.exists() else 0
         with open(path, "rb") as f:
             coords = np.frombuffer(f.read(), dtype="<f4")
         lat, lon = coords[:coords.size // 2], coords[coords.size // 2:]
-        self._grid = UnstructuredGrid(lat, lon, region=self.region, max_km=self.model.max_km)
-        self._grid_points = lat.size
-        return written
+        loaded = self._grid = (UnstructuredGrid(lat, lon, region=self.region, max_km=self.model.max_km), lat.size)
+        return *loaded, written
 
     def _fetch_grid(self, run: datetime, path: Path) -> int:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -286,13 +292,13 @@ class DwdIconSource:
         log.info("%s run %s: fetching %d field(s) at %s, params %s, ~%.1f MB", self.name,
                  run.strftime("%Y-%m-%d %HZ"), len(groups), step_list(sorted({s for s, _ in groups})),
                  ",".join(params), size / 1e6)
-        grid_bytes = self._ensure_grid(run)  # normally loaded by prepare() already
+        grid, points, grid_bytes = self._ensure_grid(run)  # normally loaded by prepare() already
         reservation = self.budget.reserve(size) if self.budget is not None else None
         per_batch = max(1, _FILES_PER_BATCH // self.model.members)
         written = 0
         try:
             for i in range(0, len(groups), per_batch):
-                written += self._fetch_groups(run, groups[i:i + per_batch])
+                written += self._fetch_groups(run, groups[i:i + per_batch], grid, points)
         finally:
             if reservation is not None:
                 self.budget.settle(reservation, written)
@@ -300,7 +306,8 @@ class DwdIconSource:
             self.on_download(self.name, run, written)
         return written + grid_bytes
 
-    def _fetch_groups(self, run: datetime, groups: list[tuple[int, str]]) -> int:
+    def _fetch_groups(self, run: datetime, groups: list[tuple[int, str]], grid: UnstructuredGrid,
+                      points: int) -> int:
         members = range(1, self.model.members + 1)
         downloads: list[Download] = []
         try:
@@ -310,14 +317,13 @@ class DwdIconSource:
                     os.close(fd)
                     downloads.append(Download(self._url(run, param, member, step), None, path))
             written = sum(self.fetcher.download_many(downloads))
-            grid = self._grid
             for g, (step, param) in enumerate(groups):
                 paths = [d.dest for d in downloads[g * len(members):(g + 1) * len(members)]]
                 fields = self.decoder.decode_files(paths)
                 if len(fields) != len(members):
                     raise SourceError(f"{self.model.model}: {param} +{step}h has {len(fields)} fields for "
                                       f"{len(members)} members")
-                if any(f.size != self._grid_points for f in fields):
+                if any(f.size != points for f in fields):
                     self._forget_grid()
                     raise SourceError(f"{self.model.model}: field size doesn't match the grid; grid will be "
                                       f"refetched, try again")
@@ -365,8 +371,8 @@ class DwdIconSource:
         run = self.find_run(query, params)
         steps = self.model.steps()
         sampling = sampling_for(query, run, steps)
-        downloaded = self._ensure_grid(run)
-        interp = self._grid.interpolation(query.lat, query.lon)
+        grid, _, downloaded = self._ensure_grid(run)
+        interp = grid.interpolation(query.lat, query.lon)
 
         needed = {name: self._step_indices(name, sampling) for name in base_vars}
         by_step: dict[int, set[str]] = {}
