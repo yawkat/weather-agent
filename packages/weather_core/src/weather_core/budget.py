@@ -11,6 +11,10 @@ from dataclasses import dataclass
 from .sources.base import SourceError
 
 
+class BudgetExceeded(SourceError):
+    """A download would exceed a limit; another run of the same model wouldn't fit either."""
+
+
 @dataclass
 class Reservation:
     time: float
@@ -47,19 +51,19 @@ class DownloadBudget:
             self._query.reset(token)
 
     def reserve(self, nbytes: int) -> Reservation:
-        """Account for a download before it starts; raises SourceError if it would exceed a limit."""
+        """Account for a download before it starts; raises BudgetExceeded if it would exceed a limit."""
         used_by_query = self._query.get()
         before = used_by_query[0] if used_by_query is not None else 0
         if before + nbytes > self.per_request_bytes:
             already = f" ({before / 1e6:.0f} MB already for other models)" if before else ""
-            raise SourceError(f"this query would download {(before + nbytes) / 1e6:.0f} MB{already}, more than the "
+            raise BudgetExceeded(f"this query would download {(before + nbytes) / 1e6:.0f} MB{already}, more than the "
                               f"per-query limit of {self.per_request_bytes / 1e6:.0f} MB; use a shorter time range, "
                               f"fewer variables or fewer models")
         with self._lock:
             now = self._prune()
             used = sum(r.nbytes for r in self._recent)
             if used + nbytes > self.per_hour_bytes - self._keep_free.get():
-                raise SourceError(f"hourly download limit reached ({used / 1e6:.0f} of "
+                raise BudgetExceeded(f"hourly download limit reached ({used / 1e6:.0f} of "
                                   f"{self.per_hour_bytes / 1e6:.0f} MB used); cached data is still served")
             reservation = Reservation(now, nbytes, used_by_query)
             self._recent.append(reservation)

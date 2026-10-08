@@ -17,7 +17,7 @@ import numpy as np
 
 from ..evaluate import SourceInfo
 from ..grid import EUROPE, Crop, Region, RegularGrid
-from ..budget import DownloadBudget
+from ..budget import BudgetExceeded, DownloadBudget
 from ..store import FieldStore
 from ..timeaxis import OutsideForecast
 from .base import (NEEDS, Decoder, Download, Fetcher, Prepared, Query, SourceError, SourceSamples, runs_by_coverage,
@@ -46,6 +46,12 @@ INTERVAL_VARS = {name for name, (_, kind) in PARAMS.items() if kind != "instant"
 # Some parameters are published under different names depending on lead time: IFS ENS gusts are "10fg3"
 # (max over the last 3 h) at some steps and "10fg" or "10fg6" (last 6 h) at others. Stored under the first name.
 ALIASES = {"10fg": ("10fg", "10fg3", "10fg6")}
+
+# A run's index is on data.ecmwf.int minutes before its files are on the mirrors, and the origin throttles (HTTP 429)
+# while everyone fetches a new run: a listed run may not be downloadable yet. One that fails is passed over for
+# RUN_COOLDOWN_S, and queries take the next run that covers them (at most MAX_RUNS_TRIED runs per query).
+RUN_COOLDOWN_S = 300
+MAX_RUNS_TRIED = 3
 
 
 class MissingParameter(SourceError):
@@ -105,6 +111,7 @@ class EcmwfSource:
         self.budget = budget
         self._index_cache: dict[tuple[datetime, int], list[dict] | None] = {}
         self._index_cache_time: dict[tuple[datetime, int], float] = {}
+        self._failed_runs: dict[datetime, float] = {}  # run → when fetching from it failed (time.monotonic)
 
     @property
     def name(self) -> str:
@@ -146,20 +153,33 @@ class EcmwfSource:
 
     def find_run(self, query: Query) -> datetime:
         """Newest run that covers the query and has published every needed step."""
+        runs = self.covering_runs(query)
+        if not runs:
+            raise SourceError(f"{self.model.model}: no published run covers this time")
+        return runs[0]
+
+    def covering_runs(self, query: Query) -> list[datetime]:
+        """Runs that cover the query and list every needed step, best first (see runs_by_coverage). Runs that
+        recently failed to download come last."""
         candidates = self.candidate_runs()
         for key in [k for k in self._index_cache if k[0] not in candidates]:
-            del self._index_cache[key], self._index_cache_time[key]
+            self._index_cache.pop(key, None)
+            self._index_cache_time.pop(key, None)
+        now = time.monotonic()
+        for run in [r for r, at in self._failed_runs.items() if r not in candidates or now - at >= RUN_COOLDOWN_S]:
+            self._failed_runs.pop(run, None)
         def sampling(run):
             try:
                 return sampling_for(query, run, self.model.steps(run))
             except OutsideForecast:
                 return None
+        runs = []
         for run, s in runs_by_coverage(candidates, sampling):
             steps = self.model.steps(run)
             last_step = steps[max(with_previous(s.needed_steps()))]
             if self._index(run, last_step) is not None:
-                return run
-        raise SourceError(f"{self.model.model}: no published run covers this time")
+                runs.append(run)
+        return [r for r in runs if r not in self._failed_runs] + [r for r in runs if r in self._failed_runs]
 
     # -- fetching ------------------------------------------------------------------------------------------------
 
@@ -259,11 +279,27 @@ class EcmwfSource:
                         lambda times: attribution(info, times, run))
 
     def _fetch(self, query: Query, variables: Collection[str]):
+        runs = self.covering_runs(query)
+        if not runs:
+            raise SourceError(f"{self.model.model}: no published run covers this time")
+        error: SourceError | None = None
+        for run in runs[:MAX_RUNS_TRIED]:
+            try:
+                return self._fetch_run(query, variables, run)
+            except BudgetExceeded:
+                raise  # not the run's fault: another run would need as much
+            except SourceError as e:  # not published on any working host, or every host failing
+                self._failed_runs[run] = time.monotonic()
+                log.warning("%s run %s can't be fetched (%s); trying an older run", self.name,
+                            run.strftime("%Y-%m-%d %HZ"), e)
+                error = e
+        raise error
+
+    def _fetch_run(self, query: Query, variables: Collection[str], run: datetime):
         provided = self.provides()
         usable = [v for v in variables if v in provided]
         base_vars = set().union(*(NEEDS[v] for v in usable)) if usable else set()
         unavailable = {v for v in variables if v not in provided}
-        run = self.find_run(query)
         steps = self.model.steps(run)
         sampling = sampling_for(query, run, steps)
         interp = self.crop.interpolation(query.lat, query.lon)

@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from weather_core.grid import Region, RegularGrid
-from weather_core.sources.base import Query, SourceError
+from weather_core.sources.base import NotPublished, Query, SourceError
 from weather_core.sources.ecmwf import IFS_ENS, EcmwfSource
 from weather_core.sources.mirrors import Mirrors
 from weather_core.store import FieldStore
@@ -182,6 +182,49 @@ def test_download_budget_is_enforced(tmp_path):
     query = hourly(start, 24)
     with pytest.raises(SourceError, match="per-query limit"):
         src.samples(query, ["precip", "t2m", "wind", "gust"])
+
+
+class Uploading(FakeServer):
+    """The 06z run's index is out (on the origin), but its files can't be fetched yet: a lagging mirror, or a
+    throttled origin. Its index has the 00z run's layout."""
+
+    def __init__(self):
+        super().__init__(published_until=60)
+        self.failed = 0
+
+    def get(self, url):
+        return super().get(url.replace("20261007060000", "20261007000000"))
+
+    def _download(self, url, ranges, dest):
+        if "20261007060000" in url:
+            self.failed += 1
+            raise NotPublished(f"{url}: HTTP 404")
+        return super()._download(url, ranges, dest)
+
+
+def test_a_listed_run_that_cant_be_fetched_falls_back_to_the_previous_run(tmp_path):
+    server = Uploading()
+    src = EcmwfSource(IFS_ENS, server, FakeDecoder(), FieldStore(tmp_path), region=Region(45, 0, 55, 15),
+                      clock=lambda: RUN + timedelta(hours=8), grid=GRID)
+    query = hourly(RUN + timedelta(hours=24), 6)
+    assert src.find_run(query) == RUN + timedelta(hours=6)
+    assert src.samples(query, ["precip"]).info.run == RUN
+    assert server.failed == 1
+    # For a while, the next query goes straight to the run that works.
+    assert src.samples(hourly(RUN + timedelta(hours=30), 3), ["t2m"]).info.run == RUN
+    assert server.failed == 1
+
+
+def test_budget_refusals_dont_fall_back(tmp_path):
+    from weather_core.budget import BudgetExceeded, DownloadBudget
+
+    server = Uploading()
+    budget = DownloadBudget(per_request_bytes=10, per_hour_bytes=10**9)
+    src = EcmwfSource(IFS_ENS, server, FakeDecoder(), FieldStore(tmp_path), region=Region(45, 0, 55, 15),
+                      clock=lambda: RUN + timedelta(hours=8), grid=GRID, budget=budget)
+    with pytest.raises(BudgetExceeded):
+        src.samples(hourly(RUN + timedelta(hours=24), 6), ["precip"])
+    assert server.downloads == 0 and server.failed == 0
 
 
 def test_route_samples_use_their_own_point(source):
