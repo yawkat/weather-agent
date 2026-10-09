@@ -533,14 +533,23 @@ function subtitle() {
   const range = a === b ? fmtWhen(a) : `${fmtWhen(a)} – ${fmtWhen(b)}`;
   if (!chart.timezone) return range;
   // The zone's name and its offset, both when daylight saving time changes within the range.
-  const offsets = [...new Set([a, b].map(offsetOf))].filter(Boolean);
+  const offsets = [...new Set([a, b].map(offsetOf))].filter((o) => o && o !== chart.timezone);
   return `${range} (${[chart.timezone, offsets.join("/")].filter(Boolean).join(", ")})`;
 }
 
+// "UTC+5:30", "UTC" for UTC+0 (so London across the end of summer time is "UTC+1/UTC"); "" where the browser
+// doesn't know shortOffset (Safari before 15.4).
 function offsetOf(m) {
-  const parts = formatter({ timeZoneName: "shortOffset" }).formatToParts(date(m));
+  let parts;
+  try {
+    parts = formatter({ timeZoneName: "shortOffset" }).formatToParts(date(m));
+  } catch (e) {
+    return "";
+  }
   const name = (parts.find((p) => p.type === "timeZoneName") || {}).value;
-  return name && name !== "GMT" ? name.replace("GMT", "UTC") : "";
+  // Chrome writes UTC+0 as "GMT", others as "GMT+0".
+  if (!name) return "";
+  return /^GMT(\+0)?$/.test(name) ? "UTC" : name.replace("GMT", "UTC");
 }
 
 function renderWarnings() {
@@ -867,7 +876,8 @@ function setGraphHover(position, entry, clientY) {
     const show = position !== null && panel.axis.dim === (entry && entry.axis.dim);
     panel.cursor.setAttribute("visibility", show ? "visible" : "hidden");
     if (show) {
-      const cx = panel.x(centreOf(panel.axis, position));
+      // Where the hovered panel reads it: panels with another step (hourly next to daily) mark the same time.
+      const cx = panel.x(centreOf(entry.axis, position));
       panel.cursor.setAttribute("x1", cx);
       panel.cursor.setAttribute("x2", cx);
     }
