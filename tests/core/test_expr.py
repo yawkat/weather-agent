@@ -252,6 +252,57 @@ def test_meaningful_time_integrals_are_not_warned_about():
     assert answer["units"] == {"hdd": "°C·h", "frost": "h", "rain": "mm", "p": ""}
 
 
+class Windy(Synthetic):
+    """Member m blows from 340 + 15 m degrees at 10 km/h: 340, 355, 10, 25 straddle north."""
+
+    def __init__(self, members=4):
+        super().__init__("windy", members=members, provides=("wind", "wind_dir"))
+
+    def prepare(self, query, variables):
+        prepared = super().prepare(query, variables)
+        direction = np.radians(340 + 15 * np.arange(self.members))[:, None] * np.ones((1, len(query.lat)))
+        prepared.base_per_step["wind_u"] = {i: -10 / 3.6 * np.sin(direction) for i in range(len(STEPS))}
+        prepared.base_per_step["wind_v"] = {i: -10 / 3.6 * np.cos(direction) for i in range(len(STEPS))}
+        return prepared
+
+
+@pytest.mark.parametrize("reduction", [
+    'd.mean("member")', 'd.median("member")', 'd.quantile([0.1, 0.9], "member")', 'd.max("member")',
+    'd.std("member")', 'd.sel(member=[0, 1]).mean("time")', 'd.isel(member=0).resample(time="1D").mean()',
+    'd.rolling(time=2).mean()', 'd.where(d > 0).mean("member")', 'd.round().mean("member")',
+    'd.median("member").mean("time")', 'd.where(wx.wind > 5, 0).mean("member")',
+    'np.where(wx.wind > 5, d, 0).mean("member")', 'd.clip(min=0).mean("member")',
+])
+def test_reducing_directions_is_warned_about(reduction):
+    answer = ask(WX + 'd = wx.wind_dir\n' + reduction, Windy())
+    assert any("treats directions as numbers on a line" in w for w in answer["warnings"])
+
+
+def test_directions_reduce_as_in_xarray_and_circularly_on_request():
+    # Linear, as in xarray: 340, 355, 10 and 25 average to 182.5 (south), with a warning.
+    linear = ask(WX + 'wx.wind_dir.isel(time=0).mean("member")', Windy())
+    assert by_model(linear["result"]) == {"windy": pytest.approx(182.5)}
+    # The vector mean the warning suggests: north, no warnings.
+    answer = ask(WX + 'r = np.deg2rad(wx.wind_dir.isel(time=0))\n'
+                      'm = np.rad2deg(np.arctan2(np.sin(r).mean("member"), np.cos(r).mean("member"))) % 360\n'
+                      'dev = (wx.wind_dir.isel(time=0) - m + 180) % 360 - 180\n'
+                      '{"mean": m, "spread": dev.quantile([0, 1], "member"), '
+                      '"north": ((wx.wind_dir >= 315) | (wx.wind_dir < 45)).mean(["member", "time"]), '
+                      '"members": wx.wind_dir.count("member").max("time")}', Windy())
+    assert answer["warnings"] == []
+    assert answer["units"] == {"mean": "°", "spread": "°", "north": "", "members": ""}
+    row, = rows(answer["result"])
+    assert row["mean"] == pytest.approx(2.5)
+    assert [row["spread_p0"], row["spread_p100"]] == pytest.approx([-22.5, 22.5])
+    assert row["north"] == 1.0
+
+
+def test_trigonometry_takes_radians():
+    answer = ask(WX + 'np.sin(wx.wind_dir).mean(["member", "time"])', Windy())
+    assert any("np.sin takes radians" in w for w in answer["warnings"])
+    assert ask(WX + 'np.arctan2(wx.wind, wx.wind).max(["member", "time"])', Windy())["units"] == "rad"
+
+
 def test_labels_of_extremes():
     answer = ask('forecast().interp(lat=50, lon=7).sel(time=slice("2026-10-08T00:00", "2026-10-09T00:00")).t2m.median("member")'
                  '.idxmax("time")')

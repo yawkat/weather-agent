@@ -49,8 +49,13 @@ RESAMPLE = {"1h": 1, "2h": 2, "3h": 3, "4h": 4, "6h": 6, "8h": 8, "12h": 12, "24
 STEP_MINUTES = {HOURLY: 60, **{freq: hours * 60 for freq, hours in RESAMPLE.items()}}
 # Variables whose time integral from zero means little (as opposed to rates like precipitation).
 STATE = {"t2m", "td2m", "rh", "feels_like", "wind", "wind_dir", "gust", "cloud", "cape", "headwind", "crosswind"}
+# Compass directions: reducing them as numbers (mean, quantiles, …) is wrong where they straddle north.
+DIRECTIONS = {"wind_dir"}
 NUMPY = {"maximum": np.maximum, "minimum": np.minimum, "abs": np.abs, "sqrt": np.sqrt, "hypot": np.hypot,
+         "sin": np.sin, "cos": np.cos, "arctan2": np.arctan2, "deg2rad": np.deg2rad, "rad2deg": np.rad2deg,
          "where": None}
+DEGREES = Unit.parse("°")
+RADIANS = Unit.parse("rad")
 COORDINATES = ("lat", "lon", "distance_km")
 SPECIAL = {"gpx", "np", "xr", "top", "bottom", "abs", *FUNCTIONS}
 LOCATE_HINT = (".interp(lat=…, lon=…), .interp(places(…)), .interp(route(…)) or .sel(lat=slice(…), "
@@ -662,6 +667,12 @@ def isel_spec(value: ast.expr) -> tuple[str, object, bool]:
     return "positions", [_integer(value, "position")], True
 
 
+def _directions(branches: list[Node]) -> bool:
+    """Whether choosing between these values (where) gives a direction: some are, the others are constants."""
+    return any(b.type.direction for b in branches) and all(b.type.direction or b.type.unit is None
+                                                           for b in branches)
+
+
 def _reachable(root: Node) -> list[Node]:
     seen: dict[int, Node] = {}
     stack = [root]
@@ -931,7 +942,7 @@ class _Compiler:
         space = (LAT, LON) if location is None else location.space
         unit = Unit.parse(CATALOG[name].unit)
         flavour = ROUTE if location is not None and location.kind == "route" else HOURLY
-        typ = Type(NUM, (MODEL, MEMBER, TIME) + space, unit, name in STATE, flavour)
+        typ = Type(NUM, (MODEL, MEMBER, TIME) + space, unit, name in STATE, flavour, direction=name in DIRECTIONS)
         return self.apply_selections(Leaf(location, name, typ, variable=True), dataset, location)
 
     def apply_selections(self, result: Node, dataset: Dataset, location: Location | None) -> Node:
@@ -1086,7 +1097,7 @@ class _Compiler:
             self.reduction_warnings(node, x, dims, "quantile")
             keep = tuple(d for d in t.dims if d not in dims) + ((QUANTILE,) if as_dim else ())
             unit = NO_UNIT if t.kind == BOOL else t.unit
-            typ = Type(NUM, keep, unit, t.state, t.time if TIME not in dims else None)
+            typ = Type(NUM, keep, unit, t.state, t.time if TIME not in dims else None, direction=t.direction)
             return Quantile(x, levels, dims, as_dim, typ)
         if method in ("sel", "isel"):
             if args:
@@ -1108,8 +1119,10 @@ class _Compiler:
             # The value branches must agree in unit (the condition's doesn't matter), as in np.where.
             unit = self.combine([x, parts[2]], node, "same").unit if other is not None else t.unit
             kind = t.kind if other is None or parts[2].type.kind == t.kind else NUM
+            direction = _directions([x] if other is None else [x, parts[2]])
             fn = (lambda a, c: rt.where(c, a, np.nan)) if other is None else (lambda a, c, o: rt.where(c, a, o))
-            return Elementwise(fn, parts, Type(kind, typ.dims, unit if kind == NUM else NO_UNIT, False, typ.time))
+            return Elementwise(fn, parts, Type(kind, typ.dims, unit if kind == NUM else NO_UNIT, False, typ.time,
+                                               direction=direction))
         if method == "clip":
             self.only(node, kwargs, ("min", "max"))
             if len(args) > 2:
@@ -1118,11 +1131,13 @@ class _Compiler:
             lo = -np.inf if bounds[0] is None else _number(bounds[0], "clip bound")
             hi = np.inf if bounds[1] is None else _number(bounds[1], "clip bound")
             self.array_kind(node, x, NUM, BOOL)
-            return Elementwise(lambda a: np.clip(a, lo, hi), [x], Type(NUM, t.dims, t.unit, False, t.time))
+            return Elementwise(lambda a: np.clip(a, lo, hi), [x], Type(NUM, t.dims, t.unit, False, t.time,
+                                                                       direction=t.direction))
         if method == "round":
             self.only(node, kwargs, ("decimals",))
             n = _integer(kwargs.get("decimals", args[0] if args else ast.Constant(0)), "decimals")
-            return Elementwise(lambda a: np.round(a, n), [x], Type(NUM, t.dims, t.unit, t.state, t.time))
+            return Elementwise(lambda a: np.round(a, n), [x], Type(NUM, t.dims, t.unit, t.state, t.time,
+                                                                   direction=t.direction))
         if method in ("rolling", "resample"):
             if args or len(kwargs) != 1 or TIME not in kwargs:
                 raise _error(node, f"{method}(time=…)")
@@ -1217,15 +1232,19 @@ class _Compiler:
             unit = (unit or NO_UNIT) * HOURS
             if t.state:
                 self.warn_state_sum(node, p.x)
+        self.warn_linear_direction(node, p.x, method)
         kind = BOOL if t.kind == BOOL and method in ("max", "min") else NUM
         state = t.state and method != "sum"
+        direction = t.direction and method != "sum"
         if p.kind == "rolling":
-            return Rolling(p.x, p.arg, method, Type(kind, t.dims, unit, state, t.time))
+            return Rolling(p.x, p.arg, method, Type(kind, t.dims, unit, state, t.time, direction=direction))
         if p.kind == "resample":
-            return Group(p.x, "resample", p.arg, method, Type(kind, t.dims, unit, state, p.arg), self.env.tz)
+            return Group(p.x, "resample", p.arg, method, Type(kind, t.dims, unit, state, p.arg, direction=direction),
+                         self.env.tz)
         new = HOUR if p.kind == "hour" else BINS
         dims = ordered([d for d in t.dims if d != TIME] + [new])
-        return Group(p.x, p.kind, p.arg, method, Type(kind, dims, unit, state, None), self.env.tz)
+        return Group(p.x, p.kind, p.arg, method, Type(kind, dims, unit, state, None, direction=direction),
+                     self.env.tz)
 
     def reduce(self, node: ast.Call, x: Node, dims: list[str], how: str) -> Node:
         t = x.type
@@ -1240,11 +1259,14 @@ class _Compiler:
             unit = NO_UNIT
         kind = BOOL if how in ("any", "all") or (how in ("max", "min") and t.kind == BOOL) else NUM
         state = t.state and not (how == "sum" and TIME in dims) and how != "count"
-        return Reduce(x, dims, how, Type(kind, keep, unit, state, t.time if TIME not in dims else None))
+        direction = t.direction and how in ("mean", "median", "min", "max")
+        typ = Type(kind, keep, unit, state, t.time if TIME not in dims else None, direction=direction)
+        return Reduce(x, dims, how, typ)
 
     def reduction_warnings(self, node: ast.AST, x: Node, dims: list[str], how: str) -> None:
         if how == "sum" and TIME in dims and x.type.state:
             self.warn_state_sum(node, x)
+        self.warn_linear_direction(node, x, how)
         if MODEL in dims and x.type.has(MEMBER):
             if MEMBER in dims:
                 self.warnings.add(f"line {node.lineno}: pooling members across models weighs each model by its "
@@ -1254,6 +1276,15 @@ class _Compiler:
                 self.warnings.add(f"line {node.lineno}: reducing model while members remain combines unrelated "
                                   f"members (member 3 of one model has nothing to do with member 3 of another); "
                                   f"reduce member first")
+
+    def warn_linear_direction(self, node: ast.AST, x: Node, how: str) -> None:
+        if x.type.direction and how != "count":
+            self.warnings.add(f"line {node.lineno}: {how}() treats directions as numbers on a line, where 350° and "
+                              f"10° are 340° apart (their mean is 180°): only right while they don't straddle north. "
+                              f"Average unit vectors instead: r = np.deg2rad(d), then np.rad2deg(np.arctan2("
+                              f"np.sin(r).mean(\"member\"), np.cos(r).mean(\"member\"))) % 360. For a spread, take "
+                              f"quantiles of the deviation from that mean m, (d - m + 180) % 360 - 180; or count a "
+                              f"sector, ((d >= 315) | (d < 45)).mean(\"member\")")
 
     def warn_state_sum(self, node: ast.AST, x: Node) -> None:
         self.warnings.add(f"line {node.lineno}: summing a state variable over time adds up "
@@ -1318,7 +1349,7 @@ class _Compiler:
     @staticmethod
     def dropped(t: Type, dim: str) -> Type:
         return Type(t.kind, tuple(d for d in t.dims if d != dim), t.unit, t.state, t.time if dim != TIME else None,
-                    t.fields, t.label_dim)
+                    t.fields, t.label_dim, t.direction)
 
     def dataset_select(self, node: ast.Call, ds: Dataset, method: str, args, kwargs) -> Node:
         if args:
@@ -1435,12 +1466,20 @@ class _Compiler:
             typ = self.combine(parts, node, "other")
             typ = Type(NUM, typ.dims, unit, False, typ.time)
             kind = BOOL if parts[1].type.kind == parts[2].type.kind == BOOL else NUM
-            return Elementwise(rt.where, parts, Type(kind, typ.dims, typ.unit, False, typ.time))
-        n = 2 if name in ("maximum", "minimum", "hypot") else 1
+            direction = _directions(parts[1:])
+            return Elementwise(rt.where, parts, Type(kind, typ.dims, typ.unit, False, typ.time, direction=direction))
+        n = 2 if name in ("maximum", "minimum", "hypot", "arctan2") else 1
         parts = [self.array(a, NUM, BOOL) for a in self.positional(node, n)]
-        if name in ("maximum", "minimum", "hypot"):
+        if name in ("maximum", "minimum", "hypot", "arctan2"):
             typ = self.combine(parts, node, "same" if name != "hypot" else "other")
-            typ = Type(NUM, typ.dims, typ.unit, False, typ.time)
+            typ = Type(NUM, typ.dims, RADIANS if name == "arctan2" else typ.unit, False, typ.time)
+        elif name in ("sin", "cos", "deg2rad", "rad2deg"):
+            t = parts[0].type
+            if name in ("sin", "cos") and t.unit == DEGREES:
+                self.warnings.add(f"line {node.lineno}: np.{name} takes radians; convert degrees with np.deg2rad(…)")
+            unit = {"sin": NO_UNIT, "cos": NO_UNIT, "deg2rad": RADIANS, "rad2deg": DEGREES}[name]
+            # An angle from rad2deg (of an arctan2) is a direction again, e.g. a per-member circular mean.
+            typ = Type(NUM, t.dims, unit, False, t.time, direction=name == "rad2deg")
         elif name == "sqrt":
             t = parts[0].type
             typ = Type(NUM, t.dims, None if t.unit is None else t.unit ** 0.5, False, t.time)

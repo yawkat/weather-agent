@@ -113,6 +113,7 @@ xarray subset (all reductions take explicit dimensions, one name or a list):
 - `.sum`, `.mean`, `.median`, `.min`, `.max`, `.std`, `.any`, `.all`, `.count`
 - `.quantile(q, dim)` (adds a `quantile` dimension for a list of q)
 - `.where(cond, other)`, `.clip(min=…, max=…)`, `np.maximum`, `np.minimum`, `np.hypot`, `np.sqrt`
+- `np.sin`, `np.cos`, `np.arctan2` (radians), `np.deg2rad`, `np.rad2deg`: for averaging directions (below)
 - `.sel`, `.isel`
 - `.rolling(time=n).sum()/.mean()/.max()/.min()`: labelled at the window's end, as in xarray
 - `.resample(time="3h" | "1D").sum()/.mean()/.max()/.min()`: local time
@@ -140,10 +141,31 @@ Warnings come back with the result. They never block it:
 | Summing a state variable over time without a threshold (`t2m.sum("time")`, `cloud.sum("time")`) | "°C·h from 0 °C is rarely meaningful; did you mean .mean("time"), a duration ((t2m > 25).sum("time")) or degree-hours ((t2m - 18).clip(min=0).sum("time"))?" |
 | Reducing `member` and `model` together, or `member` after `model` | "members are pooled across models: models with more members weigh more (IFS 50, ICON-D2 20)" |
 | Adding values with different units (`t2m + precip`) | "adding °C and mm/h" |
+| Reducing a direction (`wind_dir.mean("member")`, `.median`, `.quantile`, `.min`/`.max`, `.std`, `.sum`, also in `rolling`/`resample`/`groupby`) | "treats directions as numbers on a line, where 350° and 10° are 340° apart …", with the vector mean below |
+| `np.sin`/`np.cos` of degrees | "np.sin takes radians; convert degrees with np.deg2rad(…)" |
 | A probability from a model that reaches only part of the selected time | "icon-d2-eps covers only 10:00–12:00 of the selection" |
 
 Hours of a condition, degree-hours, rates turned into amounts and durations are the meaningful time integrals. For
 state variables the warning points to the mean or a threshold.
+
+### Directions
+
+`wind_dir` is a compass direction (0 = north, 90 = east). Reductions treat it as a number, as xarray does: the mean
+of 350° and 10° is 180°, the opposite of both. This is only right while the values stay on one side of north, so
+reducing a direction warns (`count` doesn't). The query stays xarray: we don't switch to a circular mean on our own.
+A direction stays one through selections, `where` (with another direction or a constant), `clip`, `round` and
+`median`/`min`/`max`/`quantile`. Arithmetic returns a plain number in °, so the expressions below don't warn.
+
+```python
+d = wx.wind_dir
+r = np.deg2rad(d)
+m = np.rad2deg(np.arctan2(np.sin(r).mean("member"), np.cos(r).mean("member"))) % 360  # mean of unit vectors
+spread = ((d - m + 180) % 360 - 180).quantile([0.1, 0.9], "member")   # deviation from m, in -180…180
+northerly = ((d >= 315) | (d < 45)).mean("member")                   # probability of a sector
+```
+
+Members whose directions differ widely give a mean near nowhere (unit vectors cancel out); look at the spread or a
+sector probability then.
 
 ## Results
 

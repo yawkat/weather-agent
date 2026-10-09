@@ -1,8 +1,9 @@
 """Static types of forecast expressions: dimensions, kinds and units.
 
 Arrays have named dimensions, always kept in the order of DIMS (operations align by name, so the order is only a
-convention). Their static type also carries a unit and whether the value is still a linear function of a state
-variable (temperature, wind, …), which makes summing it over time suspicious.
+convention). Their static type also carries a unit, whether the value is still a linear function of a state
+variable (temperature, wind, …), which makes summing it over time suspicious, and whether it is a compass direction,
+which reductions treat as a number on a line (as xarray does: 350° and 10° average to 180°, not 0°).
 """
 
 from dataclasses import dataclass, field
@@ -98,6 +99,7 @@ class Type:
     time: str | None = None  # flavour of the time dimension, if any (HOURLY, "3h", "1D", ROUTE)
     fields: tuple[tuple[str, "Type"], ...] = ()  # records
     label_dim: str | None = None  # LABEL: which dimension's labels
+    direction: bool = False  # a compass direction in ° (wind_dir): reducing it is suspicious; arithmetic drops this
 
     def has(self, dim: str) -> bool:
         return dim in self.dims
