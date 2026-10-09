@@ -88,6 +88,8 @@ button { font: inherit; color: inherit; }
 .key.bar { width: 8px; height: 10px; border-radius: 1px; opacity: 0.9; }
 .key.bar.faint { opacity: var(--faint); }
 .key + .key { margin-left: -2px; }
+.scale-note { margin-top: 6px; font-size: 12px; color: var(--ink-2); }
+.arrow-key { font-size: 13px; line-height: 1; color: var(--ink-2); }
 .key.night { width: 12px; height: 10px; border-radius: 2px; background: var(--night); box-shadow: inset 0 0 0 1px var(--ring); }
 svg text.now { fill: var(--ink-2); font-size: 10px; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--ink-2); font-size: 12px; margin: 6px 0 2px; }
@@ -374,8 +376,9 @@ function prepareField(f) {
   const percent = !yesno && f.unit === "" && values.length > 0 && values.every((v) => v >= 0 && v <= 1);
   // Amounts can go negative only as differences (between models, over time), which aren't amounts to draw as such.
   const negative = values.some((v) => v < 0);
+  const over360 = values.some((v) => v > 360);
   return {
-    ...f, sizes, strides, percent, yesno, negative,
+    ...f, sizes, strides, percent, yesno, negative, over360,
     // pin: the map cell ({ lat, lon } indices) whose forecast over time shows under the maps.
     view: { timeIndex: 0, quantile: null, pin: null },
     has: (d) => f.dims.includes(d),
@@ -398,6 +401,9 @@ function quantityOf(f) {
     case "mm/h": case "mm": return f.negative ? null : "precip";
     case "°C": return "temperature";
     case "km/h": return "wind";
+    // A direction lies in 0…360; a change of one (diff) goes negative, and a named field of degrees that isn't
+    // called a direction is likely a spread (std). An unnamed std still looks like a direction: only the query knows.
+    case "°": return !f.negative && !f.over360 && (!f.name || /dir/i.test(f.name)) ? "direction" : null;
     case "W/m²": case "J/kg": return "energy";
     case "%": return /cloud/i.test(f.name || "") ? "cloud" : null;
     default: return null;
@@ -484,9 +490,16 @@ function fmtValue(f, v) {
   if (v === null || v === undefined) return "–";
   if (f.yesno) return v >= 0.5 ? "yes" : "no";
   if (f.percent) return `${Math.round(v * 100)} %`;
+  if (quantityOf(f) === "direction") return `${Math.round(((v % 360) + 360) % 360)}° ${compass(v)}`;
   const a = Math.abs(v);
   const digits = a >= 100 || a === 0 ? 0 : a >= 10 ? 1 : a >= 1 ? 1 : 2;
   return `${v.toFixed(digits)}${f.unit ? ` ${f.unit}` : ""}`;
+}
+
+const COMPASS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+
+function compass(deg) {
+  return COMPASS[Math.round((((deg % 360) + 360) % 360) / 22.5) % 16];
 }
 
 function fmtTick(f, v) {
@@ -629,11 +642,19 @@ function shownModels(f) {
 // ---- graphs -----------------------------------------------------------------------------------------------
 
 const MARGIN = { l: 44, r: 8, t: 6, b: 20 };
+const ARROW_ROW = 26;
 const TOP_AXIS = 16;
 let graphPanels = []; // { svg, x(t), field, place, frame }
 let hoverX = null;
 
 function xAxisOf(f) {
+  const axis = xAxisBase(f);
+  // Directions as arrows, a row per model: as a line, 359° and 1° would be the graph's height apart.
+  if (quantityOf(f) === "direction") axis.arrows = true;
+  return axis;
+}
+
+function xAxisBase(f) {
   const d = X_DIMS.find((x) => f.has(x));
   const c = f.coords[d];
   // Precipitation over buckets (hours, resampled steps, hours of the day, bins) is a bar per bucket: each sample
@@ -669,7 +690,7 @@ function renderGraphs(body, graphs) {
     if (a.bars) a.steps = barsTooNarrow(a, ranges[a.dim], width, shownModels(graphs[i]).length);
   });
   const legend = html("div", { class: "legend" }, body);
-  const lines = graphs.filter((f, i) => !axes[i].bars);
+  const lines = graphs.filter((f, i) => !axes[i].bars && !axes[i].arrows);
   const bars = graphs.filter((f, i) => axes[i].bars);
   const anyMembers = lines.some((f) => f.has("member"));
   const anyQuantile = lines.some((f) => f.has("quantile"));
@@ -689,6 +710,12 @@ function renderGraphs(body, graphs) {
   if (barSpread || stepSpread) {
     legendItem(legend, "var(--ink-2)", [...(barSpread ? ["bar faint"] : []), ...(stepSpread ? ["thin"] : [])],
       bars.some((f) => f.has("member")) ? "9 in 10 members up to" : "highest quantile");
+  }
+  if (axes.some((a) => a.arrows)) {
+    const item = html("span", {}, legend);
+    html("span", { class: "arrow-key", "aria-hidden": "true" }, item, "↗");
+    item.appendChild(document.createTextNode(graphs.some((f, i) => axes[i].arrows && f.has("member"))
+      ? "the way the wind blows (faint where members disagree)" : "the way the wind blows"));
   }
   if (graphs.some((f, i) => axes[i].time && sunPlace(f, 0, axes[i]))) legendItem(legend, "", "night", "night");
   if (anyMembers) {
@@ -715,7 +742,8 @@ function renderGraphs(body, graphs) {
       label.appendChild(document.createTextNode(`${f.unit && !f.percent ? ` ${f.unit}` : ""}`));
       if (f.has("point")) head.appendChild(document.createTextNode(placeName(f, p)));
       const top = first && axes[i].time ? MARGIN.t + TOP_AXIS : MARGIN.t;
-      const height = plot + top + MARGIN.b;
+      // Arrows take a row per model, not a plot.
+      const height = (axes[i].arrows ? ARROW_ROW * shownModels(f).length : plot) + top + MARGIN.b;
       const svg = el("svg", { viewBox: `0 0 ${width} ${height}`, height, tabindex: 0, role: "img",
         "aria-label": `${fieldLabel(f)} graph; use the arrow keys to read values` }, panel);
       const frame = { width, height, top, axis: axes[i], range: ranges[axes[i].dim], topAxis: first && axes[i].time };
@@ -784,6 +812,7 @@ function drawGraph(svg, f, place, frame) {
   const models = shownModels(f);
   const series = models.map((m) => ({ model: m, color: colorOf(m), ...seriesOf(f, place, m) }));
   if (axis.bars) for (const s of series) Object.assign(s, barsOf(s));
+  if (axis.arrows) for (const s of series) Object.assign(s, directionsOf(s));
   let lo = Infinity;
   let hi = -Infinity;
   for (const s of series) {
@@ -810,7 +839,7 @@ function drawGraph(svg, f, place, frame) {
   const y = (v) => top + (1 - (v - lo) / (hi - lo)) * (height - top - MARGIN.b);
 
   const grid = el("g", {}, svg);
-  for (const tick of ticks) {
+  for (const tick of axis.arrows ? [] : ticks) {
     el("line", { x1: MARGIN.l, x2: width - MARGIN.r, y1: y(tick), y2: y(tick), stroke: "var(--grid)",
       "shape-rendering": "crispEdges" }, grid);
     el("text", { x: MARGIN.l - 6, y: y(tick) + 4, "text-anchor": "end" }, grid).textContent = fmtTick(f, tick);
@@ -870,8 +899,8 @@ function drawGraph(svg, f, place, frame) {
         .textContent = String(axis.labels[i]);
     });
   }
-  el("line", { x1: MARGIN.l, x2: width - MARGIN.r, y1: y(lo), y2: y(lo), stroke: "var(--axis)",
-    "shape-rendering": "crispEdges" }, grid);
+  el("line", { x1: MARGIN.l, x2: width - MARGIN.r, y1: height - MARGIN.b, y2: height - MARGIN.b,
+    stroke: "var(--axis)", "shape-rendering": "crispEdges" }, grid);
   if (quantityOf(f) === "temperature" && lo < 0 && hi > 0) {
     // Freezing.
     el("line", { x1: MARGIN.l, x2: width - MARGIN.r, y1: y(0), y2: y(0), stroke: "var(--s1)", "stroke-opacity": 0.6,
@@ -880,7 +909,8 @@ function drawGraph(svg, f, place, frame) {
 
   const marks = el("g", {}, svg);
   const single = series.length === 1;
-  if (axis.bars && axis.steps) drawSteps(marks, axis, series, x, y);
+  if (axis.arrows) drawArrows(marks, axis, series, x, top);
+  else if (axis.bars && axis.steps) drawSteps(marks, axis, series, x, y);
   else if (axis.bars) drawBars(marks, axis, series, x, y);
   else for (const s of series) {
     for (const [low, high] of s.bands) band(marks, axis, low, high, x, y, s.color, single ? 0.22 : 0.12);
@@ -994,6 +1024,57 @@ function drawBars(parent, axis, series, x, y) {
       }
     });
   });
+}
+
+// Directions per position: members' circular mean, how far they agree (the mean resultant length, 0…1) and their
+// circular standard deviation; else the median (or lowest) level, or the value. Linear quantiles of members at
+// 350° and 10° would say south.
+function directionsOf(s) {
+  const rad = Math.PI / 180;
+  if (s.members.length) {
+    const mean = [];
+    const agree = [];
+    const spread = [];
+    s.members[0].forEach((_, i) => {
+      const column = s.members.map((row) => row[i]).filter((v) => v !== null);
+      if (!column.length) { mean.push(null); agree.push(null); spread.push(null); return; }
+      const sin = column.reduce((a, v) => a + Math.sin(v * rad), 0) / column.length;
+      const cos = column.reduce((a, v) => a + Math.cos(v * rad), 0) / column.length;
+      const r = Math.min(1, Math.hypot(sin, cos));
+      mean.push(((Math.atan2(sin, cos) / rad) + 360) % 360);
+      agree.push(r);
+      spread.push(r > 0 ? Math.sqrt(-2 * Math.log(r)) / rad : 180);
+    });
+    return { median: mean, agree, spread, bands: [], members: [] };
+  }
+  return { median: s.median || (s.bands[0] && s.bands[0][0]), agree: null, spread: null, bands: [] };
+}
+
+// An arrow per position (thinned to about 16 px apart) in each model's row, pointing the way the wind blows: the
+// data gives where it blows from, as weather reports do.
+function drawArrows(parent, axis, series, x, top) {
+  const n = axis.positions.length;
+  const step = n > 1 ? Math.abs(x(axis.positions[1]) - x(axis.positions[0])) : 100;
+  const every = Math.max(1, Math.ceil(16 / (step || 1)));
+  series.forEach((s, k) => {
+    const cy = top + ARROW_ROW * (k + 0.5);
+    if (series.length > 1) {
+      el("line", { x1: MARGIN.l - 22, x2: MARGIN.l - 8, y1: cy, y2: cy, stroke: s.color, "stroke-width": 2,
+        ...(dashOf(s.model) ? { "stroke-dasharray": dashOf(s.model)[0] } : {}) }, parent);
+    }
+    for (let i = 0; i < n; i += every) {
+      const deg = s.median[i];
+      if (deg === null || deg === undefined) continue;
+      const opacity = s.agree ? 0.2 + 0.8 * s.agree[i] : 1;
+      arrow(parent, x(centreOf(axis, axis.positions[i])), cy, deg, 1, s.color, opacity);
+    }
+  });
+}
+
+// An arrow glyph about 14 units long at (x, y), pointing downwind of a direction the wind blows from.
+function arrow(parent, x, y, from, size, color, opacity) {
+  return el("path", { d: "M0,-7L4.5,5L0,2.5L-4.5,5Z", fill: color, "fill-opacity": opacity,
+    transform: `translate(${x.toFixed(1)},${y.toFixed(1)}) rotate(${(from + 180) % 360}) scale(${size})` }, parent);
 }
 
 // Bars too narrow to tell apart, as steps over each bucket: the median in the model's line style, and thin the
@@ -1131,7 +1212,8 @@ function setGraphHover(position, entry, clientY) {
   for (const s of entry.series) {
     const median = s.median ? s.median[i] : null;
     const range = s.bands.length ? [s.bands[0][0][i], s.bands[0][1][i]] : null;
-    const wet = s.wet && s.wet[i] !== null ? `${Math.round(s.wet[i] * 100)} % wet` : "";
+    const wet = s.wet && s.wet[i] !== null ? `${Math.round(s.wet[i] * 100)} % wet`
+      : s.spread && s.spread[i] !== null ? `spread ±${Math.round(s.spread[i])}°` : "";
     // How many members the range is of: 20 members' 10–90 % is shakier than 51's.
     const what = [s.model !== undefined ? modelName(s.model) : "", s.count ? `${s.count[i]} members` : ""]
       .filter(Boolean).join(" · ");
@@ -1450,7 +1532,11 @@ function renderMaps(body, f) {
     const labels = el("g", {}, svg);
     draws.push(() => drawMapLayer(layer, labels, f, model, p, scale, pinnable ? pin : null));
   });
-  scaleLegend(body, f, scale);
+  if (quantityOf(f) === "direction") {
+    html("div", { class: "scale-note" }, body, "↗ the way the wind blows; hover for degrees");
+  } else {
+    scaleLegend(body, f, scale);
+  }
   const pinBox = html("div", { class: "pin" }, body);
   const redraw = () => {
     draws.forEach((d) => d());
@@ -1494,7 +1580,7 @@ function renderPin(box, f, unpin) {
   const [first, last] = extent(axis.positions);
   const range = [first, last + spanOf(axis)];
   if (axis.bars) axis.steps = barsTooNarrow(axis, range, width, shownModels(g).length);
-  const height = 120 + MARGIN.t + MARGIN.b;
+  const height = (axis.arrows ? ARROW_ROW * shownModels(g).length : 120) + MARGIN.t + MARGIN.b;
   const svg = el("svg", { viewBox: `0 0 ${width} ${height}`, height, tabindex: 0, role: "img",
     "aria-label": `${fieldLabel(f)} at ${label}; use the arrow keys to read values` }, panel);
   drawGraph(svg, g, 0, { width, height, top: MARGIN.t, axis, range, topAxis: false });
@@ -1553,8 +1639,11 @@ function drawMapLayer(layer, labels, f, model, p, scale, pin) {
     const cx = p.x(c.lon[i]);
     const cy = p.y(lat);
     const fill = v === null ? "none" : scale.color(v);
-    const dot = el("circle", { cx, cy, r: 7, fill: fill === "none" ? "var(--surface)" : fill,
-      stroke: "var(--ink)", "stroke-width": 1 }, layer);
+    // A direction is an arrow (with a ring around, to hover), a value a coloured dot.
+    const direction = quantityOf(f) === "direction";
+    const dot = el("circle", { cx, cy, r: direction ? 9 : 7, fill: direction || fill === "none" ? "var(--surface)" : fill,
+      stroke: "var(--ink)", "stroke-width": 1, ...(direction ? { "stroke-opacity": 0.3 } : {}) }, layer);
+    if (direction && v !== null) arrow(layer, cx, cy, v, 0.9, "var(--ink)", 0.85).setAttribute("pointer-events", "none");
     cellHover(dot, f, (m) => f.at({ ...index, ...modelAt(f, m), point: i }), placeName(f, i), model);
     el("text", { x: cx + 10, y: cy + 4, class: "place" }, labels).textContent =
       `${c.labels ? `${c.labels[i]} ` : ""}${fmtValue(f, v)}`;
@@ -1572,6 +1661,7 @@ function drawGrid(layer, f, model, p, scale, index, pin) {
   // Half a cell in drawing units, whichever way the axes run.
   const hw = Math.abs(p.x(lons[0] + dLon) - p.x(lons[0])) / 2;
   const hh = Math.abs(p.y(lats[0] + dLat) - p.y(lats[0])) / 2;
+  if (quantityOf(f) === "direction") return drawGridArrows(layer, f, model, p, index, pin, hw, hh);
   const paths = new Map();
   const run = (color, j0, j1, lat) => {
     if (color === null || color === "none") return;
@@ -1598,6 +1688,32 @@ function drawGrid(layer, f, model, p, scale, index, pin) {
   });
   const cells = el("g", { opacity: 0.85 }, layer);
   for (const [color, d] of paths) el("path", { d, fill: color }, cells);
+  gridInteraction(layer, f, model, p, index, pin, hw, hh);
+}
+
+// Directions on a map: arrows the way the wind blows, about 20 px apart (every k-th cell), not colours.
+function drawGridArrows(layer, f, model, p, index, pin, hw, hh) {
+  const lats = f.coords.lat.values;
+  const lons = f.coords.lon.values;
+  const ki = Math.max(1, Math.ceil(20 / (2 * hh)));
+  const kj = Math.max(1, Math.ceil(20 / (2 * hw)));
+  const size = Math.min(1.2, (Math.min(ki * hh, kj * hw) * 2 * 0.8) / 14);
+  const g = el("g", {}, layer);
+  for (let i = Math.floor(ki / 2); i < lats.length; i += ki) {
+    for (let j = Math.floor(kj / 2); j < lons.length; j += kj) {
+      const v = f.at({ ...index, lat: i, lon: j });
+      if (v !== null) arrow(g, p.x(lons[j]), p.y(lats[i]), v, size, "var(--ink)", 0.75);
+    }
+  }
+  gridInteraction(layer, f, model, p, index, pin, hw, hh);
+}
+
+// The pinned cell's outline, and one hit area for the whole grid that finds the cell under the pointer.
+function gridInteraction(layer, f, model, p, index, pin, hw, hh) {
+  const lats = f.coords.lat.values;
+  const lons = f.coords.lon.values;
+  const dLat = lats.length > 1 ? lats[1] - lats[0] : 0.1;
+  const dLon = lons.length > 1 ? lons[1] - lons[0] : 0.1;
   const xs = extent(lons.map(p.x));
   const ys = extent(lats.map(p.y));
   const pinned = f.view.pin;
@@ -1747,6 +1863,10 @@ function renderDots(body, f) {
     html("div", { class: "stat" }, body, fmtValue(f, f.data[0]));
     return;
   }
+  if (quantityOf(f) === "direction") {
+    renderDirectionDots(body, f);
+    return;
+  }
   const models = shownModels(f);
   const places = f.has("point") ? f.size("point") : 1;
   const rows = [];
@@ -1809,6 +1929,48 @@ function renderDots(body, f) {
       el("circle", { cx: x(r.marks.mid), cy, r: 5, fill: color, stroke: "var(--surface)", "stroke-width": 2 }, svg);
       el("text", { x: Math.min(x(r.marks.mid) + 9, width - 60), y: cy - 7 }, svg).textContent = fmtValue(f, r.marks.mid);
     }
+  });
+}
+
+// Directions without an axis: per place and model, an arrow the way the wind blows and the value, as on graphs
+// (members' circular mean, faint where they disagree, and their spread); a linear axis would put 350° and 10° at
+// its two ends.
+function renderDirectionDots(body, f) {
+  const rows = [];
+  const places = f.has("point") ? f.size("point") : 1;
+  for (let p = 0; p < places; p++) {
+    for (const model of shownModels(f)) {
+      const index = { point: p, ...modelAt(f, model) };
+      let s;
+      if (f.has("member")) {
+        const members = Array.from({ length: f.size("member") }, (_, m) => [f.at({ ...index, member: m })]);
+        s = directionsOf({ members, bands: [], median: null });
+      } else if (f.has("quantile")) {
+        const levels = f.coords.quantile.values;
+        const median = levels.indexOf(0.5);
+        s = { median: [f.at({ ...index, quantile: median >= 0 ? median : 0 })], agree: null, spread: null };
+      } else {
+        s = { median: [f.at(index)], agree: null, spread: null };
+      }
+      const name = [f.has("point") ? placeName(f, p) : "", model !== undefined ? modelName(model) : ""]
+        .filter(Boolean).join(" · ") || fieldLabel(f);
+      rows.push({ name, model, s });
+    }
+  }
+  const width = Math.max(280, Math.min(document.getElementById("body").clientWidth, 720));
+  const labelW = Math.min(150, width * 0.35);
+  const rowH = 26;
+  const panel = html("div", { class: "panel" }, body);
+  const svg = el("svg", { viewBox: `0 0 ${width} ${rows.length * rowH}`, height: rows.length * rowH, role: "img",
+    "aria-label": `${fieldLabel(f)} per model` }, panel);
+  rows.forEach((r, i) => {
+    const cy = i * rowH + rowH / 2;
+    el("text", { x: 0, y: cy + 4, class: "place" }, svg).textContent = r.name.length > 24 ? `${r.name.slice(0, 23)}…` : r.name;
+    const v = r.s.median[0];
+    if (v === null || v === undefined) return;
+    arrow(svg, labelW + 10, cy, v, 1, colorOf(r.model), r.s.agree ? 0.2 + 0.8 * r.s.agree[0] : 1);
+    const spread = r.s.spread && r.s.spread[0] !== null ? ` · spread ±${Math.round(r.s.spread[0])}°` : "";
+    el("text", { x: labelW + 26, y: cy + 4, class: "place" }, svg).textContent = `${fmtValue(f, v)}${spread}`;
   });
 }
 
