@@ -116,6 +116,8 @@ svg text.town.big { fill: var(--ink); font-size: 11px; font-weight: 600; }
   background: var(--surface); border: 1px solid var(--ring); border-radius: 8px; padding: 6px 8px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); font-size: 12px; }
 #tooltip .when { color: var(--ink-2); margin-bottom: 4px; }
+#tooltip .hint { color: var(--muted); margin-top: 4px; font-size: 11px; }
+.pin .panel-head .chip { padding: 0 8px; }
 #tooltip .row { display: flex; align-items: baseline; gap: 6px; }
 #tooltip .row .key { align-self: center; }
 #tooltip .row strong { font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -374,7 +376,8 @@ function prepareField(f) {
   const negative = values.some((v) => v < 0);
   return {
     ...f, sizes, strides, percent, yesno, negative,
-    view: { timeIndex: 0, quantile: null },
+    // pin: the map cell ({ lat, lon } indices) whose forecast over time shows under the maps.
+    view: { timeIndex: 0, quantile: null, pin: null },
     has: (d) => f.dims.includes(d),
     size: (d) => sizes[f.dims.indexOf(d)] || 1,
     at(index) {
@@ -554,6 +557,7 @@ function render() {
   renderModelChips();
   const body = document.getElementById("body");
   body.replaceChildren();
+  graphPanels = [];
   const graphs = fields.filter((f) => kindOf(f) === "graph");
   if (graphs.length) renderGraphs(body, graphs);
   for (const f of fields.filter((x) => kindOf(x) === "grid" || kindOf(x) === "points")) renderMaps(body, f);
@@ -647,7 +651,6 @@ function xAxisOf(f) {
 }
 
 function renderGraphs(body, graphs) {
-  graphPanels = [];
   const axes = graphs.map(xAxisOf);
   const timeAxes = axes.filter((a) => a.time);
   const route = timeAxes.find((a) => a.route);
@@ -663,10 +666,7 @@ function renderGraphs(body, graphs) {
   // Bars need about 3 px per model and bucket; narrower, the models' bars are a comb nobody can read, and they
   // become steps: the median and, thin, the 9-in-10 level of each model.
   axes.forEach((a, i) => {
-    if (!a.bars) return;
-    const [x0, x1] = ranges[a.dim];
-    const px = ((width - MARGIN.l - MARGIN.r) * a.width) / ((x1 - x0) || 1);
-    a.steps = px / shownModels(graphs[i]).length < 3;
+    if (a.bars) a.steps = barsTooNarrow(a, ranges[a.dim], width, shownModels(graphs[i]).length);
   });
   const legend = html("div", { class: "legend" }, body);
   const lines = graphs.filter((f, i) => !axes[i].bars);
@@ -723,6 +723,10 @@ function renderGraphs(body, graphs) {
       first = false;
     }
   });
+}
+
+function barsTooNarrow(axis, [x0, x1], width, models) {
+  return ((width - MARGIN.l - MARGIN.r) * axis.width) / ((x1 - x0) || 1) / models < 3;
 }
 
 function placeName(f, p) {
@@ -1444,12 +1448,73 @@ function renderMaps(body, f) {
     drawMapLines(svg, p);
     drawTowns(svg, p, f.has("point") ? pointBoxes(f, p) : []);
     const labels = el("g", {}, svg);
-    draws.push(() => drawMapLayer(layer, labels, f, model, p, scale));
+    draws.push(() => drawMapLayer(layer, labels, f, model, p, scale, pinnable ? pin : null));
   });
   scaleLegend(body, f, scale);
-  const redraw = () => draws.forEach((d) => d());
-  if (times && times.length > 1) timeSlider(body, f, times, redraw);
+  const pinBox = html("div", { class: "pin" }, body);
+  const redraw = () => {
+    draws.forEach((d) => d());
+    renderPin(pinBox, f, pin);
+  };
+  // Over time, a cell can be pinned: its forecast over time shows under the maps. (Places over time are graphs.)
+  const pinnable = times && times.length > 1;
+  function pin(where) {
+    f.view.pin = where;
+    hideTooltip();
+    redraw();
+  }
+  if (pinnable) timeSlider(body, f, times, redraw);
+  body.appendChild(pinBox); // under the slider
   redraw();
+}
+
+// The pinned cell of a map over time, as a graph like any other (with the slider's time marked): the field at one
+// place, which also gives it that place's nights.
+function renderPin(box, f, unpin) {
+  box.replaceChildren();
+  graphPanels = graphPanels.filter((e) => e.svg.isConnected);
+  const where = f.view.pin;
+  if (!where) return;
+  const lat = f.coords.lat.values[where.lat];
+  const lon = f.coords.lon.values[where.lon];
+  const label = cellName(lat, lon);
+  const dims = f.dims.filter((d) => d !== "lat" && d !== "lon");
+  const g = { ...f, dims, coords: { ...f.coords, point: { lat: [lat], lon: [lon], labels: [label] } },
+    has: (d) => d === "point" || dims.includes(d), size: (d) => (d === "point" ? 1 : f.size(d)),
+    at: (index) => f.at({ ...index, lat: where.lat, lon: where.lon }) };
+  const panel = html("div", { class: "panel" }, box);
+  const head = html("div", { class: "panel-head" }, panel);
+  const title = html("span", {}, head);
+  html("b", {}, title, fieldLabel(f) || "value");
+  title.appendChild(document.createTextNode(`${f.unit && !f.percent ? ` ${f.unit}` : ""} at ${label}`));
+  const close = chip(head, "×", false, () => unpin(null));
+  close.setAttribute("aria-label", "Close");
+  const width = Math.max(document.getElementById("body").clientWidth, 280);
+  const axis = xAxisOf(g);
+  const [first, last] = extent(axis.positions);
+  const range = [first, last + spanOf(axis)];
+  if (axis.bars) axis.steps = barsTooNarrow(axis, range, width, shownModels(g).length);
+  const height = 120 + MARGIN.t + MARGIN.b;
+  const svg = el("svg", { viewBox: `0 0 ${width} ${height}`, height, tabindex: 0, role: "img",
+    "aria-label": `${fieldLabel(f)} at ${label}; use the arrow keys to read values` }, panel);
+  drawGraph(svg, g, 0, { width, height, top: MARGIN.t, axis, range, topAxis: false });
+  // The map's time.
+  const entry = graphPanels[graphPanels.length - 1];
+  const t = entry.x(centreOf(axis, f.coords.time.minutes[f.view.timeIndex]));
+  el("line", { x1: t, x2: t, y1: MARGIN.t, y2: height - MARGIN.b, stroke: "var(--ink)", "stroke-width": 1.5,
+    "stroke-opacity": 0.5 }, svg);
+}
+
+// A cell's coordinates and the nearest town of the basemap, when one is within 25 km.
+function cellName(lat, lon) {
+  const k = Math.cos(lat * Math.PI / 180);
+  let best = null;
+  for (const [a, b, name] of (chart.basemap && chart.basemap.places) || []) {
+    const km = 111.2 * Math.hypot(a - lat, (b - lon) * k);
+    if (!best || km < best.km) best = { km, name };
+  }
+  const near = best && best.km <= 25 ? ` · near ${best.name}` : "";
+  return `${lat.toFixed(2)}, ${lon.toFixed(2)}${near}`;
 }
 
 // Where the markers of places and their labels go, which town names keep clear of. The label shows the value at
@@ -1473,13 +1538,13 @@ function boundsOf(f) {
   return [s - 0.5, w - 0.5, n + 0.5, e + 0.5];
 }
 
-function drawMapLayer(layer, labels, f, model, p, scale) {
+function drawMapLayer(layer, labels, f, model, p, scale, pin) {
   layer.replaceChildren();
   labels.replaceChildren();
   const index = { time: f.view.timeIndex, quantile: f.view.quantile || 0 };
   if (model !== undefined) index.model = modelIndex(f, model);
   if (f.has("lat")) {
-    drawGrid(layer, f, model, p, scale, index);
+    drawGrid(layer, f, model, p, scale, index, pin);
     return;
   }
   const c = f.coords.point;
@@ -1490,7 +1555,7 @@ function drawMapLayer(layer, labels, f, model, p, scale) {
     const fill = v === null ? "none" : scale.color(v);
     const dot = el("circle", { cx, cy, r: 7, fill: fill === "none" ? "var(--surface)" : fill,
       stroke: "var(--ink)", "stroke-width": 1 }, layer);
-    cellHover(dot, f, v, placeName(f, i), model);
+    cellHover(dot, f, (m) => f.at({ ...index, ...modelAt(f, m), point: i }), placeName(f, i), model);
     el("text", { x: cx + 10, y: cy + 4, class: "place" }, labels).textContent =
       `${c.labels ? `${c.labels[i]} ` : ""}${fmtValue(f, v)}`;
   });
@@ -1499,7 +1564,7 @@ function drawMapLayer(layer, labels, f, model, p, scale) {
 // A grid as runs of equal colour along each row, one path per colour: a handful of nodes however many cells, so
 // the time slider stays smooth. The layer's opacity applies once to all of them, so neighbouring cells don't seam
 // or darken where they overlap. One hit area finds the cell under the pointer from its position.
-function drawGrid(layer, f, model, p, scale, index) {
+function drawGrid(layer, f, model, p, scale, index, pin) {
   const lats = f.coords.lat.values;
   const lons = f.coords.lon.values;
   const dLat = lats.length > 1 ? lats[1] - lats[0] : 0.1;
@@ -1535,25 +1600,46 @@ function drawGrid(layer, f, model, p, scale, index) {
   for (const [color, d] of paths) el("path", { d, fill: color }, cells);
   const xs = extent(lons.map(p.x));
   const ys = extent(lats.map(p.y));
+  const pinned = f.view.pin;
+  if (pinned) {
+    el("rect", { x: p.x(lons[pinned.lon]) - hw, y: p.y(lats[pinned.lat]) - hh, width: 2 * hw, height: 2 * hh,
+      fill: "none", stroke: "var(--ink)", "stroke-width": 1.5, "pointer-events": "none" }, layer);
+  }
   // Unfilled cells (dry, unlikely) still show their value on hover.
   const hit = el("rect", { x: xs[0] - hw, y: ys[0] - hh, width: xs[1] - xs[0] + 2 * hw, height: ys[1] - ys[0] + 2 * hh,
-    fill: "none", "pointer-events": "all" }, layer);
-  const show = (e) => {
-    const svg = outerSvg(hit);
-    const box = svg.getBoundingClientRect();
+    fill: "none", "pointer-events": "all", ...(pin ? { style: "cursor: pointer" } : {}) }, layer);
+  // The cell under the pointer, as [row, column], or null.
+  const cellAt = (e) => {
+    const box = outerSvg(hit).getBoundingClientRect();
     const lon = p.lon(((e.clientX - box.left) / box.width) * p.width);
     const lat = p.lat(((e.clientY - box.top) / box.height) * p.height);
     // The nearest row and column, as isel can leave axes uneven or out of order.
     const i = nearestIndex(lats, lat);
     const j = nearestIndex(lons, lon);
     const inside = Math.abs(lats[i] - lat) <= Math.abs(dLat) / 2 + 1e-9 && Math.abs(lons[j] - lon) <= Math.abs(dLon) / 2 + 1e-9;
-    const v = inside ? f.at({ ...index, lat: i, lon: j }) : null;
-    if (v === null) { hideTooltip(); return; }
-    showCellTooltip(svg, e, f, v, `${lats[i].toFixed(2)}, ${lons[j].toFixed(2)}`, model);
+    return inside && f.at({ ...index, lat: i, lon: j }) !== null ? [i, j] : null;
+  };
+  const show = (e) => {
+    const cell = cellAt(e);
+    if (!cell) { hideTooltip(); return; }
+    const [i, j] = cell;
+    const at = (m) => f.at({ ...index, ...modelAt(f, m), lat: i, lon: j });
+    showCellTooltip(outerSvg(hit), e, f, at, cellName(lats[i], lons[j]), model, !!pin);
   };
   hit.addEventListener("pointermove", show);
   hit.addEventListener("pointerdown", show);
   hit.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") hideTooltip(); });
+  if (pin) {
+    hit.addEventListener("click", (e) => {
+      const cell = cellAt(e);
+      if (cell) pin({ lat: cell[0], lon: cell[1] });
+    });
+  }
+}
+
+// The index of a model in a field, as for at(): none for fields without models.
+function modelAt(f, model) {
+  return model !== undefined ? { model: modelIndex(f, model) } : {};
 }
 
 function nearestIndex(values, v) {
@@ -1562,11 +1648,17 @@ function nearestIndex(values, v) {
   return best;
 }
 
-function showCellTooltip(svg, e, f, value, where, model) {
+// Every shown model's value at a cell or place (at(model) reads one), so they compare without switching maps; the
+// hovered map's model first.
+function showCellTooltip(svg, e, f, at, where, model, pinnable) {
   const tooltip = document.getElementById("tooltip");
   tooltip.replaceChildren();
   html("div", { class: "when" }, tooltip, f.has("time") ? `${where} · ${fmtWhen(f.coords.time.minutes[f.view.timeIndex])}` : where);
-  tooltipRow(tooltip, model, f, value, null, model !== undefined ? modelName(model) : "");
+  const models = shownModels(f);
+  for (const m of [model, ...models.filter((x) => x !== model)]) {
+    tooltipRow(tooltip, m, f, at(m), null, m !== undefined ? modelName(m) : "");
+  }
+  if (pinnable) html("div", { class: "hint" }, tooltip, "Click for its forecast over time");
   const box = svg.getBoundingClientRect();
   placeTooltip(svg, ((e.clientX - box.left) / box.width) * svg.viewBox.baseVal.width, e.clientY);
 }
@@ -1579,8 +1671,8 @@ function outerSvg(node) {
   return svg;
 }
 
-function cellHover(node, f, value, where, model) {
-  const show = (e) => showCellTooltip(outerSvg(node), e, f, value, where, model);
+function cellHover(node, f, at, where, model) {
+  const show = (e) => showCellTooltip(outerSvg(node), e, f, at, where, model, false);
   node.addEventListener("pointermove", show);
   node.addEventListener("pointerdown", show);
   node.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") hideTooltip(); });
