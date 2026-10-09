@@ -269,3 +269,26 @@ def test_route_samples_use_their_own_point(tmp_path):
     assert s.variables["t2m"].shape == (20, 3)
     assert s.variables["t2m"][0] == pytest.approx([10.6, 10.65, 10.7], abs=1e-3)
     assert "headwind" in s.variables
+
+
+def test_downloads_are_reported_with_fields_and_time(tmp_path):
+    calls = []
+    source = make(tmp_path, on_download=lambda *args: calls.append(args))
+    source.samples(hours(24, 2), ["t2m"])
+    [(name, run, nbytes, fields, seconds)] = calls
+    # Instants at the start of +24 h and +25 h, interpolated towards the next step: +24 h … +26 h.
+    assert (name, run, fields) == ("icon-d2-eps", RUN, 3) and nbytes > 0 and seconds >= 0
+
+
+def test_status_reports_how_far_the_cache_reaches(tmp_path):
+    source = make(tmp_path, now=RUN + timedelta(hours=2))
+    (tmp_path / "icon-d2-eps" / "stray").mkdir(parents=True)  # not a run: skipped
+    assert source.status()["runs"] == []
+    source.samples(hours(2, 4), ["t2m", "precip"])
+    s = source.status()
+    assert s["domain"].startswith("Germany") and s["schedule"] == "runs every 3 h to +48 h; hourly steps"
+    [run] = s["runs"]
+    assert run["run"] == RUN and run["reaches"] == RUN + timedelta(hours=48)
+    # The hours +2 … +5 h need the steps up to +6 h.
+    assert run["cached"]["t2m"] == run["cached"]["precip"] == RUN + timedelta(hours=6)
+    assert run["cached"]["gust"] is None

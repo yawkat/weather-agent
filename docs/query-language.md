@@ -201,6 +201,19 @@ measures: precipitation (and its sums over time, means, maxima) as bars, directi
 temperatures around 0 °C. Arithmetic, spreads (`std`) and counts measure nothing in particular and are drawn as
 plain numbers.
 
+Agents don't reach for charts unless told to, so three places steer them towards `show_forecast` for what they
+present: the server instructions (`config/mcp-instructions.md`, sent with `initialize`; set in
+`McpInstructions.java`), both tools' descriptions, and a "Showing the user" section of the help text that pairs
+kinds of question with charts.
+
+## Models now
+
+The help tool (`weather_query_help`) ends with the models as they are now (`weather_core/status.py`), so agents can
+pick models and time ranges before querying: each model's domain, members, resolution, run schedule and reach,
+the variables it lacks, its newest cached run and how far that run's cached fields reach from now, which models
+prefetch keeps warm, and what an uncached field costs, measured from recent downloads (bytes and seconds per
+parameter and step, every member, including decoding). It lists the cache directory but makes no requests.
+
 ## Examples
 
 Chance of a dry, mild ride, per model:

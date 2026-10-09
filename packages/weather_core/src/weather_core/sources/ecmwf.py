@@ -10,7 +10,7 @@ import os
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -21,8 +21,8 @@ from ..grid import EUROPE, Crop, Region, RegularGrid
 from ..budget import BudgetExceeded, DownloadBudget
 from ..store import FieldStore
 from ..timeaxis import OutsideForecast
-from .base import (NEEDS, Decoder, Download, Fetcher, Prepared, Query, SourceError, SourceSamples, runs_by_coverage,
-                   sampling_for, step_list, with_previous)
+from .base import (NEEDS, Decoder, Download, Fetcher, OnDownload, Prepared, Query, SourceError, SourceSamples,
+                   cached_runs, runs_by_coverage, sampling_for, step_list, with_previous)
 from .mirrors import Mirrors
 
 log = logging.getLogger(__name__)
@@ -52,6 +52,8 @@ ALIASES = {"10fg": ("10fg", "10fg3", "10fg6")}
 # while everyone fetches a new run: a listed run may not be downloadable yet. One that fails is passed over for
 # RUN_COOLDOWN_S, and queries take the next run that covers them (at most MAX_RUNS_TRIED runs per query).
 RUN_COOLDOWN_S = 300
+# A run is complete on the open data servers about this long after its nominal time (long runs a little later).
+PUBLISHED_AFTER_HOURS = 9
 MAX_RUNS_TRIED = 3
 
 
@@ -98,14 +100,14 @@ class EcmwfSource:
     def __init__(self, model: EcmwfModel, fetcher: Fetcher, decoder: Decoder, store: FieldStore,
                  hosts: Mirrors | None = None, region: Region = EUROPE,
                  clock=lambda: datetime.now(timezone.utc), grid: RegularGrid = GRID,
-                 on_download: Callable[[str, datetime, int], None] | None = None,
-                 budget: DownloadBudget | None = None):
+                 on_download: OnDownload | None = None, budget: DownloadBudget | None = None):
         self.model = model
         self.fetcher = fetcher
         self.decoder = decoder
         self.store = store
         # Share one between sources, so they all skip the same failing hosts.
         self.hosts = hosts or Mirrors("https://data.ecmwf.int/forecasts")
+        self.region = region
         self.crop: Crop = grid.crop(region)
         self.clock = clock
         self.on_download = on_download
@@ -122,6 +124,24 @@ class EcmwfSource:
 
     def describe(self) -> dict:
         return {"resolution": self.model.resolution, "note": self.model.note}
+
+    def status(self) -> dict:
+        """What the model is and what of it is cached (weather_core.status renders it)."""
+        m = self.model
+        long_runs = "/".join(f"{h:02d}" for h in m.long_runs)
+        steps = "6-hourly steps" if m.step_hours == 6 else f"{m.step_hours}-hourly steps to +144 h, then 6-hourly"
+        needs = {v: {PARAMS[b][0] for b in NEEDS[v]} for v in self.provides()}
+        r = self.region
+        return {
+            "model": self.name, "name": m.model, "provider": "ECMWF", "members": m.members,
+            "resolution": m.resolution, "note": m.note, "variables": sorted(needs),
+            "domain": f"global, served for {r.south:g}–{r.north:g}°N, {_lon(r.west)}–{_lon(r.east)}",
+            "schedule": f"runs every 6 h; {long_runs} UTC to +{self.max_lead_hours()} h, the others to +144 h; "
+                        f"{steps}",
+            "stale_after_hours": 6 + PUBLISHED_AFTER_HOURS,
+            "steps_per_day": 24 // m.step_hours,
+            "runs": cached_runs(self.store, self.name, m.steps, needs, self.clock()),
+        }
 
     def max_lead_hours(self) -> int:
         return self.model.steps(datetime(2000, 1, 1, self.model.long_runs[0]))[-1]
@@ -245,6 +265,7 @@ class EcmwfSource:
 
             if self.budget is not None:
                 reserve()
+            started = time.monotonic()
             written = 0
             try:
                 written = sum(self.hosts.download_many(self.fetcher, [download for download, _ in plans.values()],
@@ -259,7 +280,8 @@ class EcmwfSource:
                 if os.path.exists(download.dest):
                     os.unlink(download.dest)
         if written and self.on_download is not None:
-            self.on_download(self.name, run, written)
+            fields = len({(step, e["_canonical"]) for step, (_, wanted) in plans.items() for e in wanted})
+            self.on_download(self.name, run, written, fields, time.monotonic() - started)
         return written
 
     def _store_step(self, run: datetime, step: int, path: str, wanted: list[dict]) -> None:
@@ -365,6 +387,10 @@ class EcmwfSource:
             # Evicted by a concurrent newer run; fetch it again once.
             self._ensure_all(run, {step: {param}})
             return self.store.get(self.name, run, param, step)
+
+
+def _lon(lon: float) -> str:
+    return f"{-lon:g}°W" if lon < 0 else f"{lon:g}°E"
 
 
 def _merge(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:

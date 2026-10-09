@@ -10,7 +10,7 @@ import json
 import os
 import shutil
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +33,10 @@ def atomic_replace(src: Path, dst: Path) -> None:
 
 def run_key(run: datetime) -> str:
     return run.strftime("%Y%m%dT%H%MZ")
+
+
+def parse_run_key(key: str) -> datetime:
+    return datetime.strptime(key, "%Y%m%dT%H%MZ").replace(tzinfo=timezone.utc)
 
 
 class FieldStore:
@@ -80,6 +84,11 @@ class FieldStore:
     def runs(self, source: str) -> list[str]:
         directory = self.root / source
         return sorted(p.name for p in directory.iterdir()) if directory.exists() else []
+
+    def steps(self, source: str, run: str, variable: str) -> set[int]:
+        """Cached steps of one variable of a run (a name from `runs`)."""
+        directory = self.root / source / run / variable
+        return {int(p.stem) for p in directory.glob("*.f32")} if directory.exists() else set()
 
     def _evict_older(self, source: str, writing: str) -> None:
         # Never evict the run being written: a query may need an older run (a time range starting before the
