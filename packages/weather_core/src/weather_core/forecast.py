@@ -217,6 +217,11 @@ class Forecaster:
             drawn["models"] = answer["models"]
             drawn["attribution"] = attribution
             drawn["warnings"] = answer["warnings"]
+            # Where the graphs of a single place are (no point dimension carries it): the view shades its nights.
+            places = {(r.lat, r.lon) for r in resolved.values() if not math.isnan(r.lat)}
+            if len(places) == 1:
+                lat, lon = places.pop()
+                drawn["location"] = {"lat": round(lat, 4), "lon": round(lon, 4)}
         return answer, drawn
 
     # -- internals -----------------------------------------------------------------------------------------------

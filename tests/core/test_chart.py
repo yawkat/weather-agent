@@ -63,6 +63,7 @@ def test_every_member_over_time():
     # Flat, row-major: member 2 at 11:00 (+35 h) = 10 + 1 + 3.5.
     assert field["data"][2 * 3 + 1] == 14.5
     assert "basemap" not in chart  # a single point isn't a map
+    assert chart["location"] == {"lat": 50.0, "lon": 7.0}  # where its nights are
     assert chart["models"][0]["model"] == "ramp" and chart["attribution"] == answer["attribution"]
     assert chart["timezone"] == "UTC"
     assert answer["result"]["columns"] == ["model", "member", "time", "value"]  # 30 rows fit in a table
@@ -88,6 +89,7 @@ def test_area_is_a_map_with_coastlines_and_borders():
     assert south < min(lats) and north > max(lats) and west < min(lons) and east > max(lons)
     assert chart["basemap"]["border"]  # the corner of Germany, Belgium and the Netherlands
     assert "Natural Earth" in chart["basemap"]["source"]
+    assert "location" not in chart  # an area has no one place
 
 
 @pytest.mark.parametrize("query, message", [

@@ -27,6 +27,7 @@
   --water: #dce7f1; --ground: #f3f2ee; --river: #3b7cc4; --road: #6b5a48;
   --ring: rgba(11, 11, 11, 0.10);
   --wash: rgba(11, 11, 11, 0.05);
+  --night: rgba(42, 50, 90, 0.07);
   --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
   --s5: #e87ba4; --s6: #008300; --s7: #4a3aa7; --s8: #e34948;
   --font: var(--font-sans, system-ui, -apple-system, "Segoe UI", sans-serif);
@@ -39,7 +40,7 @@
     --ink-2: var(--color-text-secondary, #c3c2b7);
     --grid: #2c2c2a; --axis: #383835; --land: #c3c2b7;
     --water: #1d2731; --ground: #222221; --river: #6aa3e3; --road: #cdbca8;
-    --ring: rgba(255, 255, 255, 0.10); --wash: rgba(255, 255, 255, 0.06);
+    --ring: rgba(255, 255, 255, 0.10); --wash: rgba(255, 255, 255, 0.06); --night: rgba(0, 0, 0, 0.28);
     --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
     --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
   }
@@ -51,7 +52,7 @@
   --ink-2: var(--color-text-secondary, #c3c2b7);
   --grid: #2c2c2a; --axis: #383835; --land: #c3c2b7;
     --water: #1d2731; --ground: #222221; --river: #6aa3e3; --road: #cdbca8;
-  --ring: rgba(255, 255, 255, 0.10); --wash: rgba(255, 255, 255, 0.06);
+  --ring: rgba(255, 255, 255, 0.10); --wash: rgba(255, 255, 255, 0.06); --night: rgba(0, 0, 0, 0.28);
   --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
   --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
 }
@@ -82,6 +83,8 @@ button { font: inherit; color: inherit; }
 .key.dot { width: 8px; height: 8px; border-radius: 50%; }
 .key.bar { width: 8px; height: 10px; border-radius: 1px; opacity: 0.9; }
 .key.bar.faint { opacity: 0.3; }
+.key.night { width: 12px; height: 10px; border-radius: 2px; background: var(--night); box-shadow: inset 0 0 0 1px var(--ring); }
+svg text.now { fill: var(--ink-2); font-size: 10px; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--ink-2); font-size: 12px; margin: 6px 0 2px; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .panel { margin-top: 10px; }
@@ -653,6 +656,7 @@ function renderGraphs(body, graphs) {
     legendItem(legend, "var(--ink-2)", "bar faint", bars.some((f) => f.has("member")) ? "9 in 10 members up to"
       : "highest quantile");
   }
+  if (graphs.some((f, i) => axes[i].time && sunPlace(f, 0, axes[i]))) legendItem(legend, "", "night", "night");
   if (!legend.childNodes.length) legend.remove();
   const width = Math.max(document.getElementById("body").clientWidth, 280);
   let first = true;
@@ -758,11 +762,32 @@ function drawGraph(svg, f, place, frame) {
     el("text", { x: MARGIN.l - 6, y: y(tick) + 4, "text-anchor": "end" }, grid).textContent = fmtTick(f, tick);
   }
   if (axis.time) {
+    const sun = sunPlace(f, place, axis);
+    if (sun) {
+      for (const [a, b] of nights(x0, x1, sun)) {
+        el("rect", { x: x(a), y: top, width: Math.max(0, x(b) - x(a)), height: height - MARGIN.b - top,
+          fill: "var(--night)" }, grid);
+      }
+    }
     const hours = localHours(x0, x1);
     const days = hours.filter(([, h]) => h === 0).map(([t]) => t);
     for (const t of days) {
       el("line", { x1: x(t), x2: x(t), y1: top, y2: height - MARGIN.b, stroke: "var(--axis)",
         "shape-rendering": "crispEdges" }, grid);
+    }
+    // 6, 12 and 18 o'clock as ticks under the axis, where they're far enough apart to mean something.
+    if (days.length && x(x0 + 360) - x(x0) >= 8) {
+      for (const [t, hour] of hours) {
+        if (hour % 6 || hour === 0) continue;
+        el("line", { x1: x(t), x2: x(t), y1: height - MARGIN.b, y2: height - MARGIN.b + 3, stroke: "var(--axis)",
+          "shape-rendering": "crispEdges" }, grid);
+      }
+    }
+    const now = Date.now() / 60000;
+    if (now > x0 && now < x1) {
+      el("line", { x1: x(now), x2: x(now), y1: top, y2: height - MARGIN.b, stroke: "var(--ink-2)",
+        "stroke-dasharray": "2 3" }, grid);
+      el("text", { x: x(now) + 3, y: top + 9, class: "now" }, grid).textContent = "now";
     }
     const edges = [x0, ...days, x1];
     const labelYs = [height - 5, frame.topAxis ? TOP_AXIS - 2 : null].filter((v) => v !== null);
@@ -793,6 +818,11 @@ function drawGraph(svg, f, place, frame) {
   }
   el("line", { x1: MARGIN.l, x2: width - MARGIN.r, y1: y(lo), y2: y(lo), stroke: "var(--axis)",
     "shape-rendering": "crispEdges" }, grid);
+  if (quantityOf(f) === "temperature" && lo < 0 && hi > 0) {
+    // Freezing.
+    el("line", { x1: MARGIN.l, x2: width - MARGIN.r, y1: y(0), y2: y(0), stroke: "var(--s1)", "stroke-opacity": 0.6,
+      "stroke-dasharray": "4 3", "shape-rendering": "crispEdges" }, grid);
+  }
 
   const marks = el("g", {}, svg);
   const single = series.length === 1;
@@ -807,6 +837,59 @@ function drawGraph(svg, f, place, frame) {
   const entry = { svg, cursor, x, field: f, place, series, axis, range };
   graphPanels.push(entry);
   attachGraphHover(entry);
+}
+
+// Where the sun of a graph is, as (minutes) → [lat, lon]: the panel's place, the rider's position on a route
+// (nearest sample), or the query's single place; null where a graph has no one place.
+function sunPlace(f, place, axis) {
+  if (f.has("point")) {
+    const c = f.coords.point;
+    return () => [c.lat[place], c.lon[place]];
+  }
+  if (axis.route) {
+    const r = axis.route;
+    return (t) => {
+      let i = 0;
+      while (i + 1 < r.minutes.length && Math.abs(r.minutes[i + 1] - t) <= Math.abs(r.minutes[i] - t)) i++;
+      return [r.lat[i], r.lon[i]];
+    };
+  }
+  const loc = chart.location;
+  return loc ? () => [loc.lat, loc.lon] : null;
+}
+
+// The sun's elevation in degrees at a time (minutes since the epoch) and place: the low-precision formulas of
+// the Astronomical Almanac, within a few hundredths of a degree for decades around 2000.
+function sunElevation(minutes, lat, lon) {
+  const rad = Math.PI / 180;
+  const d = minutes / 1440 - 10957.5; // days since 2000-01-01 12:00 UTC
+  const g = (357.529 + 0.98560028 * d) * rad;
+  const q = 280.459 + 0.98564736 * d;
+  const l = (q + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g)) * rad;
+  const e = (23.439 - 0.00000036 * d) * rad;
+  const ra = Math.atan2(Math.cos(e) * Math.sin(l), Math.cos(l));
+  const dec = Math.asin(Math.sin(e) * Math.sin(l));
+  const gmst = (18.697374558 + 24.06570982441908 * d) * 15 * rad;
+  const ha = gmst + lon * rad - ra;
+  return Math.asin(Math.sin(lat * rad) * Math.sin(dec) + Math.cos(lat * rad) * Math.cos(dec) * Math.cos(ha)) / rad;
+}
+
+// Night intervals [from, to] within a and b: sun below the horizon (its upper edge, with refraction), to 10 minutes.
+function nights(a, b, where) {
+  const out = [];
+  let start = null;
+  for (let t = a; t <= b + 10; t += 10) {
+    const tt = Math.min(t, b);
+    const [lat, lon] = where(tt);
+    const dark = sunElevation(tt, lat, lon) < -0.833;
+    if (dark && start === null) start = tt;
+    if ((!dark || tt === b) && start !== null) {
+      out.push([start, tt]);
+      start = null;
+    }
+    if (tt === b) break;
+  }
+  return out;
 }
 
 // How far along x one position reaches: hourly values sit at their label; coarser steps (resampled) and bins
@@ -1021,6 +1104,8 @@ function projection(bounds, width) {
     width, height,
     x: (lon) => ox + (lon - w) * k * scale,
     y: (lat) => oy + (n - lat) * scale,
+    lon: (x) => w + (x - ox) / (k * scale),
+    lat: (y) => n - (y - oy) / scale,
   };
 }
 
@@ -1312,21 +1397,7 @@ function drawMapLayer(layer, labels, f, model, p, scale) {
   const index = { time: f.view.timeIndex, quantile: f.view.quantile || 0 };
   if (model !== undefined) index.model = modelIndex(f, model);
   if (f.has("lat")) {
-    const lats = f.coords.lat.values;
-    const lons = f.coords.lon.values;
-    const dLat = lats.length > 1 ? Math.abs(lats[1] - lats[0]) : 0.1;
-    const dLon = lons.length > 1 ? Math.abs(lons[1] - lons[0]) : 0.1;
-    lats.forEach((lat, i) => lons.forEach((lon, j) => {
-      const v = f.at({ ...index, lat: i, lon: j });
-      if (v === null) return;
-      const x0 = p.x(lon - dLon / 2);
-      const y0 = p.y(lat + dLat / 2);
-      // Unfilled cells (dry, unlikely) still show their value on hover.
-      const rect = el("rect", { x: x0, y: y0, width: p.x(lon + dLon / 2) - x0 + 0.5,
-        height: p.y(lat - dLat / 2) - y0 + 0.5, fill: scale.color(v), "fill-opacity": 0.85,
-        "pointer-events": "all" }, layer);
-      cellHover(rect, f, v, `${lat.toFixed(2)}, ${lon.toFixed(2)}`, model);
-    }));
+    drawGrid(layer, f, model, p, scale, index);
     return;
   }
   const c = f.coords.point;
@@ -1343,17 +1414,83 @@ function drawMapLayer(layer, labels, f, model, p, scale) {
   });
 }
 
-function cellHover(node, f, value, where, model) {
-  const show = (e) => {
-    const tooltip = document.getElementById("tooltip");
-    tooltip.replaceChildren();
-    html("div", { class: "when" }, tooltip, f.has("time") ? `${where} · ${fmtWhen(f.coords.time.minutes[f.view.timeIndex])}` : where);
-    tooltipRow(tooltip, model, f, value, null,
-      model !== undefined ? modelName(model) : "");
-    const svg = node.ownerSVGElement;
-    const box = svg.getBoundingClientRect();
-    placeTooltip(svg, ((e.clientX - box.left) / box.width) * svg.viewBox.baseVal.width, e.clientY);
+// A grid as runs of equal colour along each row, one path per colour: a handful of nodes however many cells, so
+// the time slider stays smooth. The layer's opacity applies once to all of them, so neighbouring cells don't seam
+// or darken where they overlap. One hit area finds the cell under the pointer from its position.
+function drawGrid(layer, f, model, p, scale, index) {
+  const lats = f.coords.lat.values;
+  const lons = f.coords.lon.values;
+  const dLat = lats.length > 1 ? lats[1] - lats[0] : 0.1;
+  const dLon = lons.length > 1 ? lons[1] - lons[0] : 0.1;
+  // Half a cell in drawing units, whichever way the axes run.
+  const hw = Math.abs(p.x(lons[0] + dLon) - p.x(lons[0])) / 2;
+  const hh = Math.abs(p.y(lats[0] + dLat) - p.y(lats[0])) / 2;
+  const paths = new Map();
+  const run = (color, j0, j1, lat) => {
+    if (color === null || color === "none") return;
+    const [a, b] = [p.x(lons[j0]), p.x(lons[j1])];
+    const left = Math.min(a, b) - hw;
+    const right = Math.max(a, b) + hw + 0.5; // a little over, against antialiasing seams
+    const top = p.y(lat) - hh;
+    paths.set(color, `${paths.get(color) || ""}M${left.toFixed(1)},${top.toFixed(1)}H${right.toFixed(1)}`
+      + `V${(top + 2 * hh + 0.5).toFixed(1)}H${left.toFixed(1)}Z`);
   };
+  lats.forEach((lat, i) => {
+    let start = 0;
+    let color = null;
+    lons.forEach((_, j) => {
+      const v = f.at({ ...index, lat: i, lon: j });
+      const c = v === null ? null : scale.color(v);
+      if (j > 0 && c !== color) {
+        run(color, start, j - 1, lat);
+        start = j;
+      }
+      color = c;
+    });
+    run(color, start, lons.length - 1, lat);
+  });
+  const cells = el("g", { opacity: 0.85 }, layer);
+  for (const [color, d] of paths) el("path", { d, fill: color }, cells);
+  const xs = extent(lons.map(p.x));
+  const ys = extent(lats.map(p.y));
+  // Unfilled cells (dry, unlikely) still show their value on hover.
+  const hit = el("rect", { x: xs[0] - hw, y: ys[0] - hh, width: xs[1] - xs[0] + 2 * hw, height: ys[1] - ys[0] + 2 * hh,
+    fill: "none", "pointer-events": "all" }, layer);
+  const show = (e) => {
+    const svg = outerSvg(hit);
+    const box = svg.getBoundingClientRect();
+    const lon = p.lon(((e.clientX - box.left) / box.width) * p.width);
+    const lat = p.lat(((e.clientY - box.top) / box.height) * p.height);
+    const i = Math.round((lat - lats[0]) / dLat);
+    const j = Math.round((lon - lons[0]) / dLon);
+    const v = i >= 0 && i < lats.length && j >= 0 && j < lons.length ? f.at({ ...index, lat: i, lon: j }) : null;
+    if (v === null) { hideTooltip(); return; }
+    showCellTooltip(svg, e, f, v, `${lats[i].toFixed(2)}, ${lons[j].toFixed(2)}`, model);
+  };
+  hit.addEventListener("pointermove", show);
+  hit.addEventListener("pointerdown", show);
+  hit.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") hideTooltip(); });
+}
+
+function showCellTooltip(svg, e, f, value, where, model) {
+  const tooltip = document.getElementById("tooltip");
+  tooltip.replaceChildren();
+  html("div", { class: "when" }, tooltip, f.has("time") ? `${where} · ${fmtWhen(f.coords.time.minutes[f.view.timeIndex])}` : where);
+  tooltipRow(tooltip, model, f, value, null, model !== undefined ? modelName(model) : "");
+  const box = svg.getBoundingClientRect();
+  placeTooltip(svg, ((e.clientX - box.left) / box.width) * svg.viewBox.baseVal.width, e.clientY);
+}
+
+// The panel's own SVG around a map's frame: the frame's box on screen counts the basemap beyond its edges, which
+// it only clips; the panel's has the same drawing units and the box that is shown.
+function outerSvg(node) {
+  let svg = node.ownerSVGElement;
+  while (svg.ownerSVGElement) svg = svg.ownerSVGElement;
+  return svg;
+}
+
+function cellHover(node, f, value, where, model) {
+  const show = (e) => showCellTooltip(outerSvg(node), e, f, value, where, model);
   node.addEventListener("pointermove", show);
   node.addEventListener("pointerdown", show);
   node.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") hideTooltip(); });
