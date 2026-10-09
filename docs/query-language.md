@@ -152,9 +152,9 @@ state variables the warning points to the mean or a threshold.
 
 `wind_dir` is a compass direction (0 = north, 90 = east). Reductions treat it as a number, as xarray does: the mean
 of 350° and 10° is 180°, the opposite of both. This is only right while the values stay on one side of north, so
-reducing a direction warns (`count` doesn't). The query stays xarray: we don't switch to a circular mean on our
-own. A direction stays one through selections, `where`, `round` and `median`/`min`/`max`/`quantile`. Arithmetic
-returns a plain number in °, so the expressions below don't warn.
+reducing a direction warns (`count` doesn't). The query stays xarray: we don't switch to a circular mean on our own.
+A direction stays one through selections, `where` (with another direction or a constant), `clip`, `round` and
+`median`/`min`/`max`/`quantile`. Arithmetic returns a plain number in °, so the expressions below don't warn.
 
 ```python
 d = wx.wind_dir

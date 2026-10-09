@@ -667,6 +667,12 @@ def isel_spec(value: ast.expr) -> tuple[str, object, bool]:
     return "positions", [_integer(value, "position")], True
 
 
+def _directions(branches: list[Node]) -> bool:
+    """Whether choosing between these values (where) gives a direction: some are, the others are constants."""
+    return any(b.type.direction for b in branches) and all(b.type.direction or b.type.unit is None
+                                                           for b in branches)
+
+
 def _reachable(root: Node) -> list[Node]:
     seen: dict[int, Node] = {}
     stack = [root]
@@ -1113,7 +1119,7 @@ class _Compiler:
             # The value branches must agree in unit (the condition's doesn't matter), as in np.where.
             unit = self.combine([x, parts[2]], node, "same").unit if other is not None else t.unit
             kind = t.kind if other is None or parts[2].type.kind == t.kind else NUM
-            direction = t.direction and (other is None or parts[2].type.direction)
+            direction = _directions([x] if other is None else [x, parts[2]])
             fn = (lambda a, c: rt.where(c, a, np.nan)) if other is None else (lambda a, c, o: rt.where(c, a, o))
             return Elementwise(fn, parts, Type(kind, typ.dims, unit if kind == NUM else NO_UNIT, False, typ.time,
                                                direction=direction))
@@ -1125,7 +1131,8 @@ class _Compiler:
             lo = -np.inf if bounds[0] is None else _number(bounds[0], "clip bound")
             hi = np.inf if bounds[1] is None else _number(bounds[1], "clip bound")
             self.array_kind(node, x, NUM, BOOL)
-            return Elementwise(lambda a: np.clip(a, lo, hi), [x], Type(NUM, t.dims, t.unit, False, t.time))
+            return Elementwise(lambda a: np.clip(a, lo, hi), [x], Type(NUM, t.dims, t.unit, False, t.time,
+                                                                       direction=t.direction))
         if method == "round":
             self.only(node, kwargs, ("decimals",))
             n = _integer(kwargs.get("decimals", args[0] if args else ast.Constant(0)), "decimals")
@@ -1459,7 +1466,7 @@ class _Compiler:
             typ = self.combine(parts, node, "other")
             typ = Type(NUM, typ.dims, unit, False, typ.time)
             kind = BOOL if parts[1].type.kind == parts[2].type.kind == BOOL else NUM
-            direction = parts[1].type.direction and parts[2].type.direction
+            direction = _directions(parts[1:])
             return Elementwise(rt.where, parts, Type(kind, typ.dims, typ.unit, False, typ.time, direction=direction))
         n = 2 if name in ("maximum", "minimum", "hypot", "arctan2") else 1
         parts = [self.array(a, NUM, BOOL) for a in self.positional(node, n)]

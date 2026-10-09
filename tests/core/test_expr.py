@@ -270,7 +270,8 @@ class Windy(Synthetic):
     'd.mean("member")', 'd.median("member")', 'd.quantile([0.1, 0.9], "member")', 'd.max("member")',
     'd.std("member")', 'd.sel(member=[0, 1]).mean("time")', 'd.isel(member=0).resample(time="1D").mean()',
     'd.rolling(time=2).mean()', 'd.where(d > 0).mean("member")', 'd.round().mean("member")',
-    'd.median("member").mean("time")',
+    'd.median("member").mean("time")', 'd.where(wx.wind > 5, 0).mean("member")',
+    'np.where(wx.wind > 5, d, 0).mean("member")', 'd.clip(min=0).mean("member")',
 ])
 def test_reducing_directions_is_warned_about(reduction):
     answer = ask(WX + 'd = wx.wind_dir\n' + reduction, Windy())
