@@ -667,6 +667,22 @@ def isel_spec(value: ast.expr) -> tuple[str, object, bool]:
     return "positions", [_integer(value, "position")], True
 
 
+def _measure(branches: list[Node]) -> str | None:
+    """What choosing between these values (where) measures: what all of them do, constants aside."""
+    measures = {b.type.measure for b in branches if b.type.unit is not None}
+    return measures.pop() if len(measures) == 1 else None
+
+
+def _reduced_measure(t: Type, how: str, over_time: bool) -> str | None:
+    """What a reduction still measures: a typical or extreme value of the same, or a rate's sum over time (an
+    amount: rain in mm); not a spread, count or other sum. Conditions measure nothing (their mean is a share)."""
+    if t.kind != NUM:
+        return None
+    if how in ("mean", "median", "min", "max") or (how == "sum" and over_time and not t.state):
+        return t.measure
+    return None
+
+
 def _directions(branches: list[Node]) -> bool:
     """Whether choosing between these values (where) gives a direction: some are, the others are constants."""
     return any(b.type.direction for b in branches) and all(b.type.direction or b.type.unit is None
@@ -903,6 +919,11 @@ class _Compiler:
             typ = Type(NUM, typ.dims, unit, False, typ.time)
         else:
             typ = self.combine(parts, node, "other")
+            if isinstance(node.op, ast.Mod) and isinstance(parts[1], Const) and parts[1].value == 360 \
+                    and parts[0].type.unit == DEGREES:
+                # An angle wrapped to 0…360 is a compass direction, as in the vector mean's
+                # np.rad2deg(np.arctan2(…)) % 360 or the opposite direction (d + 180) % 360.
+                typ = Type(NUM, typ.dims, typ.unit, False, typ.time, direction=True)
         return Elementwise(fn, parts, typ)
 
     # -- attributes and calls
@@ -942,7 +963,8 @@ class _Compiler:
         space = (LAT, LON) if location is None else location.space
         unit = Unit.parse(CATALOG[name].unit)
         flavour = ROUTE if location is not None and location.kind == "route" else HOURLY
-        typ = Type(NUM, (MODEL, MEMBER, TIME) + space, unit, name in STATE, flavour, direction=name in DIRECTIONS)
+        typ = Type(NUM, (MODEL, MEMBER, TIME) + space, unit, name in STATE, flavour, direction=name in DIRECTIONS,
+                   measure=name)
         return self.apply_selections(Leaf(location, name, typ, variable=True), dataset, location)
 
     def apply_selections(self, result: Node, dataset: Dataset, location: Location | None) -> Node:
@@ -1097,7 +1119,8 @@ class _Compiler:
             self.reduction_warnings(node, x, dims, "quantile")
             keep = tuple(d for d in t.dims if d not in dims) + ((QUANTILE,) if as_dim else ())
             unit = NO_UNIT if t.kind == BOOL else t.unit
-            typ = Type(NUM, keep, unit, t.state, t.time if TIME not in dims else None, direction=t.direction)
+            typ = Type(NUM, keep, unit, t.state, t.time if TIME not in dims else None, direction=t.direction,
+                       measure=t.measure if t.kind == NUM else None)
             return Quantile(x, levels, dims, as_dim, typ)
         if method in ("sel", "isel"):
             if args:
@@ -1120,9 +1143,10 @@ class _Compiler:
             unit = self.combine([x, parts[2]], node, "same").unit if other is not None else t.unit
             kind = t.kind if other is None or parts[2].type.kind == t.kind else NUM
             direction = _directions([x] if other is None else [x, parts[2]])
+            measure = _measure([x] if other is None else [x, parts[2]])
             fn = (lambda a, c: rt.where(c, a, np.nan)) if other is None else (lambda a, c, o: rt.where(c, a, o))
             return Elementwise(fn, parts, Type(kind, typ.dims, unit if kind == NUM else NO_UNIT, False, typ.time,
-                                               direction=direction))
+                                               direction=direction, measure=measure))
         if method == "clip":
             self.only(node, kwargs, ("min", "max"))
             if len(args) > 2:
@@ -1132,12 +1156,12 @@ class _Compiler:
             hi = np.inf if bounds[1] is None else _number(bounds[1], "clip bound")
             self.array_kind(node, x, NUM, BOOL)
             return Elementwise(lambda a: np.clip(a, lo, hi), [x], Type(NUM, t.dims, t.unit, False, t.time,
-                                                                       direction=t.direction))
+                                                                       direction=t.direction, measure=t.measure))
         if method == "round":
             self.only(node, kwargs, ("decimals",))
             n = _integer(kwargs.get("decimals", args[0] if args else ast.Constant(0)), "decimals")
             return Elementwise(lambda a: np.round(a, n), [x], Type(NUM, t.dims, t.unit, t.state, t.time,
-                                                                   direction=t.direction))
+                                                                   direction=t.direction, measure=t.measure))
         if method in ("rolling", "resample"):
             if args or len(kwargs) != 1 or TIME not in kwargs:
                 raise _error(node, f"{method}(time=…)")
@@ -1236,15 +1260,17 @@ class _Compiler:
         kind = BOOL if t.kind == BOOL and method in ("max", "min") else NUM
         state = t.state and method != "sum"
         direction = t.direction and method != "sum"
+        measure = _reduced_measure(t, method, over_time=True)
         if p.kind == "rolling":
-            return Rolling(p.x, p.arg, method, Type(kind, t.dims, unit, state, t.time, direction=direction))
+            return Rolling(p.x, p.arg, method, Type(kind, t.dims, unit, state, t.time, direction=direction,
+                                                    measure=measure))
         if p.kind == "resample":
-            return Group(p.x, "resample", p.arg, method, Type(kind, t.dims, unit, state, p.arg, direction=direction),
-                         self.env.tz)
+            return Group(p.x, "resample", p.arg, method, Type(kind, t.dims, unit, state, p.arg, direction=direction,
+                                                              measure=measure), self.env.tz)
         new = HOUR if p.kind == "hour" else BINS
         dims = ordered([d for d in t.dims if d != TIME] + [new])
-        return Group(p.x, p.kind, p.arg, method, Type(kind, dims, unit, state, None, direction=direction),
-                     self.env.tz)
+        return Group(p.x, p.kind, p.arg, method, Type(kind, dims, unit, state, None, direction=direction,
+                                                      measure=measure), self.env.tz)
 
     def reduce(self, node: ast.Call, x: Node, dims: list[str], how: str) -> Node:
         t = x.type
@@ -1260,7 +1286,8 @@ class _Compiler:
         kind = BOOL if how in ("any", "all") or (how in ("max", "min") and t.kind == BOOL) else NUM
         state = t.state and not (how == "sum" and TIME in dims) and how != "count"
         direction = t.direction and how in ("mean", "median", "min", "max")
-        typ = Type(kind, keep, unit, state, t.time if TIME not in dims else None, direction=direction)
+        measure = _reduced_measure(t, how, over_time=TIME in dims)
+        typ = Type(kind, keep, unit, state, t.time if TIME not in dims else None, direction=direction, measure=measure)
         return Reduce(x, dims, how, typ)
 
     def reduction_warnings(self, node: ast.AST, x: Node, dims: list[str], how: str) -> None:
@@ -1349,7 +1376,7 @@ class _Compiler:
     @staticmethod
     def dropped(t: Type, dim: str) -> Type:
         return Type(t.kind, tuple(d for d in t.dims if d != dim), t.unit, t.state, t.time if dim != TIME else None,
-                    t.fields, t.label_dim, t.direction)
+                    t.fields, t.label_dim, t.direction, t.measure)
 
     def dataset_select(self, node: ast.Call, ds: Dataset, method: str, args, kwargs) -> Node:
         if args:
@@ -1467,7 +1494,8 @@ class _Compiler:
             typ = Type(NUM, typ.dims, unit, False, typ.time)
             kind = BOOL if parts[1].type.kind == parts[2].type.kind == BOOL else NUM
             direction = _directions(parts[1:])
-            return Elementwise(rt.where, parts, Type(kind, typ.dims, typ.unit, False, typ.time, direction=direction))
+            return Elementwise(rt.where, parts, Type(kind, typ.dims, typ.unit, False, typ.time, direction=direction,
+                                                     measure=_measure(parts[1:])))
         n = 2 if name in ("maximum", "minimum", "hypot", "arctan2") else 1
         parts = [self.array(a, NUM, BOOL) for a in self.positional(node, n)]
         if name in ("maximum", "minimum", "hypot", "arctan2"):

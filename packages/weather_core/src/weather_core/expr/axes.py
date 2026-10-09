@@ -100,6 +100,9 @@ class Type:
     fields: tuple[tuple[str, "Type"], ...] = ()  # records
     label_dim: str | None = None  # LABEL: which dimension's labels
     direction: bool = False  # a compass direction in ° (wind_dir): reducing it is suspicious; arithmetic drops this
+    # The catalog variable the value still measures (precip, cloud, …): kept by selections and by reductions that
+    # keep its meaning (mean, min, a rate's sum over time); arithmetic, spreads and counts drop it. Charts draw by it.
+    measure: str | None = None
 
     def has(self, dim: str) -> bool:
         return dim in self.dims

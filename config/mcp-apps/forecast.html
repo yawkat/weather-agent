@@ -11,8 +11,10 @@
 
   The result (weather_core.chart) is a list of fields, each a dense array with named dimensions. The dimensions
   pick the drawing: time / hour / distance bins, or lat or lon alone (a profile) → graph; lat × lon → map
-  (time → slider); point without an x axis → markers on a map; anything else → dots and ranges per model. model → colour, member → thin lines,
-  quantile → bands. The view never reduces data itself: what it shows is what the query asked for.
+  (time → slider); point without an x axis → markers on a map; anything else → dots and ranges per model.
+  model → colour, member → bands (and thin lines), quantile → bands. What a field measures (its measure,
+  direction and unit) picks how: rain as bars, directions as arrows, colours per quantity. The view summarises
+  members only for orientation (bands, circular means of directions): the values are what the query asked for.
 -->
 <style>
 :root {
@@ -374,11 +376,8 @@ function prepareField(f) {
   // Conditions left unreduced are yes/no; unitless numbers within 0…1 (a condition's mean) are probabilities.
   const yesno = f.kind === "condition";
   const percent = !yesno && f.unit === "" && values.length > 0 && values.every((v) => v >= 0 && v <= 1);
-  // Amounts can go negative only as differences (between models, over time), which aren't amounts to draw as such.
-  const negative = values.some((v) => v < 0);
-  const over360 = values.some((v) => v > 360);
   return {
-    ...f, sizes, strides, percent, yesno, negative, over360,
+    ...f, sizes, strides, percent, yesno,
     // pin: the map cell ({ lat, lon } indices) whose forecast over time shows under the maps.
     view: { timeIndex: 0, quantile: null, pin: null },
     has: (d) => f.dims.includes(d),
@@ -391,21 +390,20 @@ function prepareField(f) {
   };
 }
 
-// What a field measures, from its unit (and name): picks bars or lines and the map's colours. The unit follows
-// the query's arithmetic, so precip.sum("time") is still precipitation (mm).
+// What a field shows, which picks bars or lines and the map's colours. The server says what it still measures
+// (measure: the variable, kept by selections and reductions like mean or a rate's sum over time) and whether it's
+// a direction; differences, spreads and other arithmetic measure nothing in particular and are drawn plainly.
+// Units do the rest: a temperature difference is still about 0 °C.
 function quantityOf(f) {
   if (f.yesno) return "condition";
   if (f.percent) return "probability";
+  if (f.direction) return "direction";
   switch (f.unit) {
-    // A difference of precipitation (negative somewhere) is lines and a diverging map, not bars and dry cells.
-    case "mm/h": case "mm": return f.negative ? null : "precip";
+    case "mm/h": case "mm": return f.measure === "precip" || f.measure === "snow" ? "precip" : null;
     case "°C": return "temperature";
     case "km/h": return "wind";
-    // A direction lies in 0…360; a change of one (diff) goes negative, and a named field of degrees that isn't
-    // called a direction is likely a spread (std). An unnamed std still looks like a direction: only the query knows.
-    case "°": return !f.negative && !f.over360 && (!f.name || /dir/i.test(f.name)) ? "direction" : null;
     case "W/m²": case "J/kg": return "energy";
-    case "%": return /cloud/i.test(f.name || "") ? "cloud" : null;
+    case "%": return f.measure === "cloud" ? "cloud" : null;
     default: return null;
   }
 }

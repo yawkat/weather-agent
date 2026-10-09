@@ -63,6 +63,10 @@ def encode_chart(value, typ: Type, ctx: rt.Context, max_values: int = MAX_VALUES
             "name": name,
             "kind": "condition" if t.kind == BOOL else "number",
             "unit": "" if t.kind == BOOL or t.unit is None else str(t.unit),
+            # What it measures, for the view to draw it as such (rain as bars, directions as arrows, cloud in
+            # grey): from the query's static type, which arithmetic and spreads clear.
+            "measure": t.measure,
+            "direction": t.direction,
             "dims": list(v.dims),
             "coords": {d: _coord(d, v.coords[d], ctx) for d in v.dims},
             "data": _values(v.data),

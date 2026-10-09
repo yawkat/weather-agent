@@ -154,7 +154,9 @@ state variables the warning points to the mean or a threshold.
 of 350° and 10° is 180°, the opposite of both. This is only right while the values stay on one side of north, so
 reducing a direction warns (`count` doesn't). The query stays xarray: we don't switch to a circular mean on our own.
 A direction stays one through selections, `where` (with another direction or a constant), `clip`, `round` and
-`median`/`min`/`max`/`quantile`. Arithmetic returns a plain number in °, so the expressions below don't warn.
+`median`/`min`/`max`/`quantile`. Arithmetic returns a plain number in °, so the expressions below don't warn, except
+that an angle in ° wrapped to 0…360 (`… % 360`) is a direction again: the vector mean `m` below, or the opposite
+direction `(d + 180) % 360`. Charts draw directions as arrows, and plain numbers (a spread) as numbers.
 
 ```python
 d = wx.wind_dir
@@ -194,7 +196,10 @@ the selected area, filled to its edges (select a larger area for more around it)
 room around them. Under maps lies a basemap: land, lakes, coastlines, borders,
 rivers and main roads from Natural Earth 1:10m (public domain), and town names from GeoNames (CC BY 4.0, towns of
 15,000 or more), with detail to the map's scale like a web map's zoom levels (`scripts/make_basemap.py`,
-`weather_core.chart.basemap`). The agent writes the query; the view only picks colours.
+`weather_core.chart.basemap`). The agent writes the query; the view picks the drawing by what each value still
+measures: precipitation (and its sums over time, means, maxima) as bars, directions as arrows, cloud cover in grey,
+temperatures around 0 °C. Arithmetic, spreads (`std`) and counts measure nothing in particular and are drawn as
+plain numbers.
 
 ## Examples
 

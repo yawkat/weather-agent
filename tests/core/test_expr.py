@@ -297,6 +297,30 @@ def test_directions_reduce_as_in_xarray_and_circularly_on_request():
     assert row["north"] == 1.0
 
 
+def test_charts_know_what_fields_measure():
+    # Charts draw by it: rain as bars, directions as arrows. Selections and reductions that keep the meaning keep
+    # it; spreads, counts and arithmetic don't, so a direction's std or a difference of rain is drawn plainly.
+    def measures(query, *sources):
+        _, chart = forecaster(*sources).visualize(query)
+        return {f["name"]: (f["measure"], f["direction"]) for f in chart["fields"]}
+
+    assert measures(WX + '{"rain": wx.precip.sum("time"), "rate": wx.precip.median("member"), '
+                         '"wettest": wx.precip.max("member").resample(time="1D").max(), '
+                         '"difference": wx.precip.sel(model="synthetic") - wx.precip.mean("model"), '
+                         '"spread": wx.precip.std("member"), "warm": wx.t2m.where(wx.t2m > 0, 0).mean("member"), '
+                         '"warmest": wx.t2m.sum("time"), "p": (wx.precip > 0.1).mean("member")}') == {
+        "rain": ("precip", False), "rate": ("precip", False), "wettest": ("precip", False),
+        "difference": (None, False), "spread": (None, False), "warm": ("t2m", False),
+        "warmest": (None, False), "p": (None, False)}
+    assert measures(WX + 'd = wx.wind_dir\n'
+                         'r = np.deg2rad(d)\n'
+                         '{"mean": d.mean("member"), "spread": d.std("member"), "veer": d - d.isel(time=0), '
+                         '"vector": np.rad2deg(np.arctan2(np.sin(r).mean("member"), np.cos(r).mean("member"))) % 360, '
+                         '"downwind": (d + 180) % 360, "members": d}', Windy()) == {
+        "mean": ("wind_dir", True), "spread": (None, False), "veer": (None, False), "vector": (None, True),
+        "downwind": (None, True), "members": ("wind_dir", True)}
+
+
 def test_trigonometry_takes_radians():
     answer = ask(WX + 'np.sin(wx.wind_dir).mean(["member", "time"])', Windy())
     assert any("np.sin takes radians" in w for w in answer["warnings"])
