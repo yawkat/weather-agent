@@ -44,8 +44,12 @@ Nothing reduces implicitly: every reduction names its dimension(s), one or a lis
   .groupby("time.hour").mean()…   .groupby_bins("distance_km", bins=[0, 10, 20]).max()… (routes)
   .idxmax(dim) / .idxmin(dim): the label of the largest/smallest value
 Elementwise: + - * / // % **, comparisons, & | ~ (conditions; parenthesise comparisons: (a < 1) & (b > 2)),
-  .where(cond, other), .clip(min=…, max=…), .round(n), abs(x), np.maximum/minimum/where/sqrt/hypot/abs.
+  .where(cond, other), .clip(min=…, max=…), .round(n), abs(x), np.maximum/minimum/where/sqrt/hypot/abs,
+  np.sin/cos/arctan2 (radians), np.deg2rad/rad2deg.
   Arrays align by dimension name and label, as in xarray.
+Directions (wind_dir) reduce linearly, as in xarray: the mean of 350° and 10° is 180°. Average unit vectors:
+  r = np.deg2rad(d); np.rad2deg(np.arctan2(np.sin(r).mean("member"), np.cos(r).mean("member"))) % 360
+  Spread: quantiles of (d - mean + 180) % 360 - 180. Sectors: ((d >= 315) | (d < 45)).mean("member").
 Ranking: top(x, n, "time") / bottom(…) keep the n largest/smallest entries along x's one remaining dimension
   (for a dict of such arrays: by="key"); x.sortby(key, ascending=False).
 Answer several values at once with a dict: {{"p_dry": …, "rain_p90": …}}.
