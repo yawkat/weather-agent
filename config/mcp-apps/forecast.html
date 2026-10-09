@@ -79,6 +79,7 @@ button { font: inherit; color: inherit; }
 .chip[aria-pressed="true"] { border-color: var(--ink); font-weight: 600; }
 .key { display: inline-block; width: 14px; height: 2px; border-radius: 1px; background: currentColor; flex: none; }
 .key.band { height: 8px; opacity: 0.25; border-radius: 2px; }
+.key.band.inner { opacity: 0.45; }
 .key.thin { height: 1px; opacity: 0.5; }
 .key.dot { width: 8px; height: 8px; border-radius: 50%; }
 .key.bar { width: 8px; height: 10px; border-radius: 1px; opacity: 0.9; }
@@ -87,6 +88,7 @@ button { font: inherit; color: inherit; }
 svg text.now { fill: var(--ink-2); font-size: 10px; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--ink-2); font-size: 12px; margin: 6px 0 2px; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend .chip.toggle { padding: 1px 8px; font-size: 11px; color: var(--ink-2); font-weight: 400; }
 .panel { margin-top: 10px; }
 .panel-head { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--ink-2); }
 .panel-head b { color: var(--ink); font-weight: 600; }
@@ -279,6 +281,9 @@ let chart = null;
 let fields = [];
 let modelIds = [];
 let selectedModel = null; // null: all models
+// One line per member: null draws them when one model is shown (with several, their lines are a tangle that hides
+// the bands), true or false when the user chose.
+let memberLines = null;
 let playing = null; // the time slider's timer; maps keep their own time and quantile in field.view
 
 function showStatus(text, error) {
@@ -599,6 +604,10 @@ function renderModelChips() {
   }
 }
 
+function memberLinesOf(f) {
+  return f.has("member") && (memberLines !== null ? memberLines : shownModels(f).length === 1);
+}
+
 function shownModels(f) {
   if (!f.has("model")) return [undefined];
   const labels = f.coords.model.labels;
@@ -648,8 +657,13 @@ function renderGraphs(body, graphs) {
   const bars = graphs.filter((f, i) => axes[i].bars);
   const anyMembers = lines.some((f) => f.has("member"));
   const anyQuantile = lines.some((f) => f.has("quantile"));
-  if (anyMembers) legendItem(legend, "var(--ink-2)", "thin", "one line per member");
-  if (anyMembers || anyQuantile) legendItem(legend, "var(--ink-2)", "band", anyMembers ? "10–90 % of members" : "quantile range");
+  if (lines.some(memberLinesOf)) legendItem(legend, "var(--ink-2)", "thin", "one line per member");
+  if (anyMembers) {
+    legendItem(legend, "var(--ink-2)", "band", "10–90 % of members");
+    legendItem(legend, "var(--ink-2)", "band inner", "25–75 %");
+  } else if (anyQuantile) {
+    legendItem(legend, "var(--ink-2)", "band", "quantile range");
+  }
   if (anyMembers || anyQuantile) legendItem(legend, "var(--ink-2)", "", "median");
   if (bars.some((f) => f.has("member") || f.has("quantile"))) {
     legendItem(legend, "var(--ink-2)", "bar", "median");
@@ -657,6 +671,14 @@ function renderGraphs(body, graphs) {
       : "highest quantile");
   }
   if (graphs.some((f, i) => axes[i].time && sunPlace(f, 0, axes[i]))) legendItem(legend, "", "night", "night");
+  if (anyMembers) {
+    const shown = lines.some(memberLinesOf);
+    const button = chip(legend, shown ? "Hide member lines" : "Show member lines", shown, () => {
+      memberLines = !shown;
+      render();
+    });
+    button.classList.add("toggle");
+  }
   if (!legend.childNodes.length) legend.remove();
   const width = Math.max(document.getElementById("body").clientWidth, 280);
   let first = true;
@@ -704,14 +726,17 @@ function seriesOf(f, place, model) {
   const read = (extra) => Array.from({ length: n }, (_, i) => f.at({ ...base, ...extra, [xdim]: i }));
   if (f.has("member")) {
     const members = Array.from({ length: f.size("member") }, (_, m) => read({ member: m }));
-    const q = { p10: [], p50: [], p90: [] };
+    const q = { p10: [], p25: [], p50: [], p75: [], p90: [] };
+    const count = [];
     for (let i = 0; i < n; i++) {
       const column = members.map((row) => row[i]).filter((v) => v !== null).sort((a, b) => a - b);
-      q.p10.push(quantile(column, 0.1));
-      q.p50.push(quantile(column, 0.5));
-      q.p90.push(quantile(column, 0.9));
+      for (const [k, p] of [["p10", 0.1], ["p25", 0.25], ["p50", 0.5], ["p75", 0.75], ["p90", 0.9]]) {
+        q[k].push(quantile(column, p));
+      }
+      count.push(column.length);
     }
-    return { members, bands: [[q.p10, q.p90]], median: q.p50 };
+    // Outer band first: bands[0] is what tooltips and bars read.
+    return { members, bands: [[q.p10, q.p90], [q.p25, q.p75]], median: q.p50, count };
   }
   if (f.has("quantile")) {
     const levels = f.coords.quantile.values;
@@ -735,7 +760,9 @@ function drawGraph(svg, f, place, frame) {
   let lo = Infinity;
   let hi = -Infinity;
   for (const s of series) {
-    const rows = axis.bars ? [s.solid, s.faint || []] : [...s.members, ...s.bands.flat(), s.median || []];
+    // What's drawn: hidden member lines don't stretch the axis.
+    const members = memberLinesOf(f) ? s.members : [];
+    const rows = axis.bars ? [s.solid, s.faint || []] : [...members, ...s.bands.flat(), s.median || []];
     for (const row of rows) {
       for (const v of row) {
         if (v === null) continue;
@@ -829,7 +856,7 @@ function drawGraph(svg, f, place, frame) {
   if (axis.bars) drawBars(marks, axis, series, x, y);
   else for (const s of series) {
     for (const [low, high] of s.bands) band(marks, axis, low, high, x, y, s.color, single ? 0.22 : 0.12);
-    for (const row of s.members) line(marks, axis, row, x, y, s.color, 1, single ? 0.22 : 0.1);
+    if (memberLinesOf(f)) for (const row of s.members) line(marks, axis, row, x, y, s.color, 1, single ? 0.22 : 0.1);
     if (s.median) line(marks, axis, s.median, x, y, s.color, 2, 1, dashOf(s.model));
   }
   const cursor = el("line", { y1: top, y2: height - MARGIN.b, stroke: "var(--ink-2)", visibility: "hidden",
@@ -1049,7 +1076,10 @@ function setGraphHover(position, entry, clientY) {
     const median = s.median ? s.median[i] : null;
     const range = s.bands.length ? [s.bands[0][0][i], s.bands[0][1][i]] : null;
     const wet = s.wet && s.wet[i] !== null ? `${Math.round(s.wet[i] * 100)} % wet` : "";
-    tooltipRow(tooltip, s.model, entry.field, median, range, s.model !== undefined ? modelName(s.model) : "", wet);
+    // How many members the range is of: 20 members' 10–90 % is shakier than 51's.
+    const what = [s.model !== undefined ? modelName(s.model) : "", s.count ? `${s.count[i]} members` : ""]
+      .filter(Boolean).join(" · ");
+    tooltipRow(tooltip, s.model, entry.field, median, range, what, wet);
   }
   placeTooltip(entry.svg, entry.x(centreOf(entry.axis, position)), clientY);
 }
@@ -1585,7 +1615,8 @@ function renderDots(body, f) {
       if (f.has("member")) {
         values = Array.from({ length: f.size("member") }, (_, m) => f.at({ ...index, member: m })).filter((v) => v !== null);
         const sorted = [...values].sort((a, b) => a - b);
-        marks = { dots: values, range: [quantile(sorted, 0.1), quantile(sorted, 0.9)], mid: quantile(sorted, 0.5) };
+        marks = { dots: values, range: [quantile(sorted, 0.1), quantile(sorted, 0.9)],
+          inner: [quantile(sorted, 0.25), quantile(sorted, 0.75)], mid: quantile(sorted, 0.5) };
       } else if (f.has("quantile")) {
         const levels = f.coords.quantile.values;
         values = levels.map((_, q) => f.at({ ...index, quantile: q }));
@@ -1624,9 +1655,10 @@ function renderDots(body, f) {
     const cy = i * rowH + rowH / 2;
     const color = colorOf(r.model);
     el("text", { x: 0, y: cy + 4, class: "place" }, svg).textContent = r.name.length > 24 ? `${r.name.slice(0, 23)}…` : r.name;
-    if (r.marks.range) {
-      el("line", { x1: x(r.marks.range[0]), x2: x(r.marks.range[1]), y1: cy, y2: cy, stroke: color,
-        "stroke-width": 6, "stroke-opacity": 0.25, "stroke-linecap": "round" }, svg);
+    for (const [range, opacity] of [[r.marks.range, 0.25], [r.marks.inner, 0.3]]) {
+      if (!range || range[0] === null) continue; // no member has a value here
+      el("line", { x1: x(range[0]), x2: x(range[1]), y1: cy, y2: cy, stroke: color,
+        "stroke-width": 6, "stroke-opacity": opacity, "stroke-linecap": "round" }, svg);
     }
     for (const v of r.marks.dots) el("circle", { cx: x(v), cy, r: 2.5, fill: color, "fill-opacity": 0.45 }, svg);
     if (r.marks.mid !== null) {
