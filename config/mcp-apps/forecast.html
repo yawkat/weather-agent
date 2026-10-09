@@ -1656,7 +1656,7 @@ function renderDots(body, f) {
     const color = colorOf(r.model);
     el("text", { x: 0, y: cy + 4, class: "place" }, svg).textContent = r.name.length > 24 ? `${r.name.slice(0, 23)}…` : r.name;
     for (const [range, opacity] of [[r.marks.range, 0.25], [r.marks.inner, 0.3]]) {
-      if (!range) continue;
+      if (!range || range[0] === null) continue; // no member has a value here
       el("line", { x1: x(range[0]), x2: x(range[1]), y1: cy, y2: cy, stroke: color,
         "stroke-width": 6, "stroke-opacity": opacity, "stroke-linecap": "round" }, svg);
     }
