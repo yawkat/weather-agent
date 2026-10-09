@@ -1461,15 +1461,23 @@ function drawGrid(layer, f, model, p, scale, index) {
     const box = svg.getBoundingClientRect();
     const lon = p.lon(((e.clientX - box.left) / box.width) * p.width);
     const lat = p.lat(((e.clientY - box.top) / box.height) * p.height);
-    const i = Math.round((lat - lats[0]) / dLat);
-    const j = Math.round((lon - lons[0]) / dLon);
-    const v = i >= 0 && i < lats.length && j >= 0 && j < lons.length ? f.at({ ...index, lat: i, lon: j }) : null;
+    // The nearest row and column, as isel can leave axes uneven or out of order.
+    const i = nearestIndex(lats, lat);
+    const j = nearestIndex(lons, lon);
+    const inside = Math.abs(lats[i] - lat) <= Math.abs(dLat) / 2 + 1e-9 && Math.abs(lons[j] - lon) <= Math.abs(dLon) / 2 + 1e-9;
+    const v = inside ? f.at({ ...index, lat: i, lon: j }) : null;
     if (v === null) { hideTooltip(); return; }
     showCellTooltip(svg, e, f, v, `${lats[i].toFixed(2)}, ${lons[j].toFixed(2)}`, model);
   };
   hit.addEventListener("pointermove", show);
   hit.addEventListener("pointerdown", show);
   hit.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") hideTooltip(); });
+}
+
+function nearestIndex(values, v) {
+  let best = 0;
+  for (let i = 1; i < values.length; i++) if (Math.abs(values[i] - v) < Math.abs(values[best] - v)) best = i;
+  return best;
 }
 
 function showCellTooltip(svg, e, f, value, where, model) {

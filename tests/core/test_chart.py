@@ -92,6 +92,13 @@ def test_area_is_a_map_with_coastlines_and_borders():
     assert "location" not in chart  # an area has no one place
 
 
+def test_a_place_next_to_an_area_has_no_location():
+    _, chart = forecaster().visualize(f'{{"here": {POINT}.t2m.mean("member"), '
+                                      f'"there": {AREA}.t2m.mean("lat").mean("lon").mean("member")}}')
+    assert [f["dims"] for f in chart["fields"]] == [["model", "time"], ["model", "time"]]
+    assert "location" not in chart  # the area's graph has its own nights
+
+
 @pytest.mark.parametrize("query, message", [
     (f'{AREA}.precip.sum("time")', "reduce member"),
     (f'{POINT}.t2m.quantile([0.1, 0.9], "model")', "either members or quantiles"),

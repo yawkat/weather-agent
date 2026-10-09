@@ -218,10 +218,9 @@ class Forecaster:
             drawn["attribution"] = attribution
             drawn["warnings"] = answer["warnings"]
             # Where the graphs of a single place are (no point dimension carries it): the view shades its nights.
-            places = {(r.lat, r.lon) for r in resolved.values() if not math.isnan(r.lat)}
-            if len(places) == 1:
-                lat, lon = places.pop()
-                drawn["location"] = {"lat": round(lat, 4), "lon": round(lon, 4)}
+            # Only when it's the query's one location: a graph from an area elsewhere has other nights.
+            if len(resolved) == 1 and not math.isnan((only := next(iter(resolved.values()))).lat):
+                drawn["location"] = {"lat": round(only.lat, 4), "lon": round(only.lon, 4)}
         return answer, drawn
 
     # -- internals -----------------------------------------------------------------------------------------------
