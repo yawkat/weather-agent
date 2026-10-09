@@ -2,13 +2,14 @@
 
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol
 
 import numpy as np
 
 from ..evaluate import SourceInfo
 from ..samples import Samples
+from ..store import FieldStore, parse_run_key
 from ..timeaxis import StepSampling, sample_hours, sample_times
 from ..variables import derive
 
@@ -23,6 +24,11 @@ class Fetcher(Protocol):
 
         Python code here can't start threads (GraalPy context policy), so parallelism lives in the fetcher.
         """
+
+
+# Called after a source downloaded fields: (source, run, bytes, fields, seconds). A field is one parameter at one
+# step, every member; the seconds include decoding and caching.
+OnDownload = Callable[[str, datetime, int, int, float], None]
 
 
 @dataclass(frozen=True)
@@ -167,3 +173,37 @@ def step_list(steps: list[int]) -> str:
 
 def with_previous(indices: Collection[int]) -> set[int]:
     return set(indices) | {i - 1 for i in indices if i > 0}
+
+
+def cached_runs(store: FieldStore, source: str, steps: Callable[[datetime], list[int]],
+                needs: dict[str, set[str]], now: datetime) -> list[dict]:
+    """The runs a source has cached, newest first: where each reaches and, per variable (→ the stored fields it
+    needs), up to when its cached steps reach from now without a gap (None: not cached)."""
+    out = []
+    for key in reversed(store.runs(source)):
+        try:
+            run = parse_run_key(key)
+        except ValueError:
+            continue  # not a run the store wrote
+
+        run_steps = steps(run)
+        listed: dict[str, set[int]] = {}
+        def cached(field: str) -> set[int]:
+            if field not in listed:
+                listed[field] = store.steps(source, key, field)
+            return listed[field]
+        through = {variable: _cached_through(run, run_steps, [cached(f) for f in sorted(fields)], now)
+                   for variable, fields in needs.items()}
+        out.append({"run": run, "reaches": run + timedelta(hours=run_steps[-1]), "cached": through})
+    return out
+
+
+def _cached_through(run: datetime, steps: list[int], cached: list[set[int]], now: datetime) -> datetime | None:
+    """Valid time of the last step that is cached, with every step before it, from the one covering `now`."""
+    start = max((i for i, s in enumerate(steps) if run + timedelta(hours=s) <= now), default=0)
+    last = None
+    for step in steps[start:]:
+        if not all(step in c for c in cached):
+            break
+        last = step
+    return None if last is None else run + timedelta(hours=last)

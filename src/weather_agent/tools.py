@@ -60,13 +60,16 @@ def _forecast_summary(result: dict) -> str:
 @Singleton
 class ForecastTools:
     def __init__(self, service: ForecastService):
+        self.service = service
         self.forecaster = service.forecaster
 
     @Tool(description="Reference for forecast queries: the dataset, its dimensions and variables, selecting "
-                      "locations and times, reductions, and examples. Read this before the first forecast query.")
+                      "locations and times, reductions, charts, examples, and the models now: their domains, how "
+                      "far each run reaches, what is cached and what downloading the rest costs. Read this before "
+                      "the first forecast query; call it again later for fresh model status.")
     def weather_query_help(self) -> str:
         log.info("weather_query_help")
-        return describe_language()
+        return describe_language() + "\n" + self.service.describe_models()
 
     @Tool(description="Ensemble weather forecast queried with a subset of xarray (Python syntax) over one dataset, "
                       "forecast(), with dimensions model, member, time, lat and lon. The query picks its location "
@@ -75,7 +78,10 @@ class ForecastTools:
                       "explicitly, e.g. (forecast().interp(lat=50.94, lon=6.96).sel(time=slice('2026-10-10T10:00', "
                       "'2026-10-10T16:00')).precip.sum('time') < 0.5).mean('member') gives each model's probability "
                       "of a dry afternoon. Returns the answer, its units, warnings about likely mistakes, a "
-                      "per-model table (run, lead hours, members) and attribution. Read weather_query_help first.")
+                      "per-model table (run, lead hours, members) and attribution. For your own working (checks, "
+                      "single numbers, finding the right hours): to show the user a forecast over time, an area or "
+                      "a comparison of places, use show_forecast with the same query instead. Read "
+                      "weather_query_help first.")
     def forecast(self,
                  query: Annotated[str, ToolArg(description="The query; see weather_query_help")],
                  gpx: Annotated[str | None, ToolArg(description="Optional GPX document; the query refers to it as route(gpx, start=…, …)")] = None) -> str:

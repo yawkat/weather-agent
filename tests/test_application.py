@@ -191,6 +191,20 @@ def test_settings_defaults(my_context):
     assert access.accessKey() is None and access.accessKeyFile() is None
 
 
+def test_initialize_carries_instructions(my_context):
+    result = _mcp(my_context, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                             "clientInfo": {"name": "test", "version": "1"}})
+    assert "show_forecast" in result["instructions"] and "weather_query_help" in result["instructions"]
+
+
+def test_query_help_describes_the_models_now(my_context):
+    text = _mcp(my_context, "tools/call", {"name": "weather_query_help", "arguments": {}})["content"][0]["text"]
+    assert "Showing the user:" in text
+    assert "Models now (" in text
+    for model in ("ecmwf-ens", "ecmwf-aifs-ens", "icon-eu-eps", "icon-d2-eps", "icon-d2-ruc-eps"):
+        assert f"\n{model}: " in text
+
+
 def test_chart_tool_links_its_view(my_context):
     tools = {t["name"]: t for t in _mcp(my_context, "tools/list", {})["tools"]}
     uri = tools["show_forecast"]["_meta"]["ui"]["resourceUri"]

@@ -86,6 +86,12 @@ class DownloadBudget:
                 reservation.query[0] += actual - reservation.nbytes
             reservation.nbytes = actual
 
+    def used_last_hour(self) -> int:
+        """Bytes counted against the hourly limit now."""
+        with self._lock:
+            self._prune()
+            return sum(r.nbytes for r in self._recent)
+
     def _prune(self) -> float:
         now = self.clock()
         while self._recent and self._recent[0].time < now - 3600:

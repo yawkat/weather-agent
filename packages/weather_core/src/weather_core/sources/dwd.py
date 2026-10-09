@@ -19,7 +19,7 @@ import re
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -31,8 +31,8 @@ from ..evaluate import SourceInfo
 from ..grid import EUROPE, Region, UnstructuredGrid
 from ..store import FieldStore, atomic_replace
 from ..timeaxis import OutsideForecast
-from .base import (NEEDS, Decoder, Download, Fetcher, Prepared, Query, SourceError, SourceSamples, runs_by_coverage,
-                   sampling_for, step_list)
+from .base import (NEEDS, Decoder, Download, Fetcher, OnDownload, Prepared, Query, SourceError, SourceSamples,
+                   cached_runs, runs_by_coverage, sampling_for, step_list)
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +65,8 @@ _COMMON = frozenset({"T_2M", "U_10M", "V_10M", "VMAX_10M", "TOT_PREC", "SNOW_GSP
 _LISTING = re.compile(r'href="PT(\d{3})H00M\.grib2">[^<]*</a>\s+\S+\s+\S+\s+(\d+)')
 # A listing that misses steps is fetched again after this long; RUC runs upload over about two hours.
 _LISTING_TTL = 60.0
+# A run is complete on opendata.dwd.de within about this long after its nominal time.
+PUBLISHED_AFTER_HOURS = 4
 # Files per download_many call, bounding the temporary disk space a large query uses at once.
 _FILES_PER_BATCH = 160
 
@@ -80,6 +82,7 @@ class IconModel:
     hourly_until: int  # 3-hourly steps afterwards
     params: frozenset[str]
     resolution: str
+    domain: str
     max_km: float  # a point farther than this from the nearest cell lies outside the domain
     note: str
 
@@ -88,16 +91,19 @@ class IconModel:
 
 
 ICON_EU_EPS = IconModel(
-    "icon-eu-eps", "ICON-EU-EPS", "icon-eu-eps", 40, 6, 120, 75, _COMMON | {"SNOW_CON"}, "~13 km", 15.0,
+    "icon-eu-eps", "ICON-EU-EPS", "icon-eu-eps", 40, 6, 120, 75, _COMMON | {"SNOW_CON"}, "~13 km",
+    "Europe and the North Atlantic, about 29–71°N, 24°W–63°E (served for 30–72°N, 30°W–45°E)", 15.0,
     note="DWD's European ensemble (40 members), runs every 6 h to +5 days; hourly steps to +75 h, then 3-hourly. "
          "Finer than ECMWF but still parametrises showers. No dew point (no rh; feels_like is wind chill only). "
          "After +75 h, gusts are the maximum of the last hour of each 3-hour step.")
 ICON_D2_EPS = IconModel(
-    "icon-d2-eps", "ICON-D2-EPS", "icon-d2-eps", 20, 3, 48, 48, _COMMON | {"SNOW_CON", "TD_2M"}, "~2 km", 3.0,
+    "icon-d2-eps", "ICON-D2-EPS", "icon-d2-eps", 20, 3, 48, 48, _COMMON | {"SNOW_CON", "TD_2M"}, "~2 km",
+    "Germany and its neighbours, about 43–58°N, 4°W–20°E", 3.0,
     note="DWD's convection-permitting ensemble (20 members) for Germany and neighbours, runs every 3 h to +48 h, "
          "hourly. Best for showers, thunderstorms, gusts and terrain effects in the first two days.")
 ICON_D2_RUC_EPS = IconModel(
-    "icon-d2-ruc-eps", "ICON-D2-RUC-EPS", "icon-d2-ruc-eps", 20, 1, 27, 27, _COMMON | {"TD_2M"}, "~2 km", 3.0,
+    "icon-d2-ruc-eps", "ICON-D2-RUC-EPS", "icon-d2-ruc-eps", 20, 1, 27, 27, _COMMON | {"TD_2M"}, "~2 km",
+    "Germany and its neighbours, about 43–58°N, 4°W–20°E", 3.0,
     note="DWD's rapid-update convection-permitting ensemble (20 members) for Germany and neighbours: a new run "
          "every hour to about +27 h. The most recent data; best for the next hours (showers, storms, when rain "
          "starts or stops).")
@@ -107,8 +113,7 @@ class DwdIconSource:
     def __init__(self, model: IconModel, fetcher: Fetcher, decoder: Decoder, store: FieldStore,
                  base_url: str = "https://opendata.dwd.de/weather/nwp/v1/m", region: Region = EUROPE,
                  clock=lambda: datetime.now(timezone.utc),
-                 on_download: Callable[[str, datetime, int], None] | None = None,
-                 budget: DownloadBudget | None = None):
+                 on_download: OnDownload | None = None, budget: DownloadBudget | None = None):
         if not base_url.startswith("https://"):
             raise ValueError("DWD base URL must use https")
         self.model = model
@@ -144,6 +149,21 @@ class DwdIconSource:
         if variable == "feels_like":
             needs = needs - ({"td2m"} - self._base())  # humidity only refines the heat index
         return needs
+
+    def status(self) -> dict:
+        """What the model is and what of it is cached (weather_core.status renders it)."""
+        m = self.model
+        hourly = "hourly steps" if m.hourly_until == m.last_step else \
+            f"hourly steps to +{m.hourly_until} h, then 3-hourly"
+        needs = {v: {p for b in self._needs(v) for p in self._params(b)} for v in self.provides()}
+        return {
+            "model": self.name, "name": m.model, "provider": "DWD", "members": m.members,
+            "resolution": m.resolution, "note": m.note, "variables": sorted(needs), "domain": m.domain,
+            "schedule": f"runs every {m.run_every} h to +{m.last_step} h; {hourly}",
+            "steps_per_day": 24,
+            "stale_after_hours": m.run_every + PUBLISHED_AFTER_HOURS,
+            "runs": cached_runs(self.store, self.name, lambda run: m.steps(), needs, self.clock()),
+        }
 
     def max_lead_hours(self) -> int:
         return self.model.last_step
@@ -294,6 +314,7 @@ class DwdIconSource:
                  ",".join(params), size / 1e6)
         grid, points, grid_bytes = self._ensure_grid(run)  # normally loaded by prepare() already
         reservation = self.budget.reserve(size) if self.budget is not None else None
+        started = time.monotonic()
         per_batch = max(1, _FILES_PER_BATCH // self.model.members)
         written = 0
         try:
@@ -303,7 +324,7 @@ class DwdIconSource:
             if reservation is not None:
                 self.budget.settle(reservation, written)
         if written and self.on_download is not None:
-            self.on_download(self.name, run, written)
+            self.on_download(self.name, run, written, len(groups), time.monotonic() - started)
         return written + grid_bytes
 
     def _fetch_groups(self, run: datetime, groups: list[tuple[int, str]], grid: UnstructuredGrid,

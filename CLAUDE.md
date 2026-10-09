@@ -11,7 +11,7 @@ interprets itself (`weather_core/expr/`, documented in `docs/query-language.md`)
   class (pyronaut#331).
 - `src/weather_agent/`: Micronaut/MCP glue (tools, fetcher on Micronaut's HTTP client). `apps.py`: `show_forecast`,
   which also shows the answer as an interactive chart (MCP Apps; view in `config/mcp-apps/forecast.html`, protocol
-  side in `src-java/…/McpApps.java`).
+  side in `src-java/…/McpApps.java`). Server instructions for agents: `config/mcp-instructions.md`.
 - `src-java/at/yawk/weatheragent/`: Java helpers where performance or interop needs them (GRIB decoding,
   Host/Origin and secret-path filters, GraalPy native access).
 - `nix/`: pure Nix build (venv from `uv.lock`, downloads as a fixed-output derivation, offline JAR build,

@@ -69,6 +69,17 @@ Results: a number or boolean; a table with a column per remaining dimension (at 
 one table if its arrays share their dimensions. "units" gives each value's unit; "warnings" flags likely mistakes
 (e.g. summing temperature over time).
 
+Showing the user: show_forecast takes the same query, draws its answer as an interactive chart and returns the
+same answer to you. Present forecasts with it; use forecast for your own checks and single numbers. Fitting charts:
+  "Weather tomorrow / this weekend in X": a meteogram, every member of every model over the hours,
+    {{"t2m": day.t2m, "precip": day.precip, "gust": day.gust}}
+  "When does it stop raining?": a probability over the hours, (day.precip > 0.1).mean("member")
+  "Where will it storm / rain?": a map of a probability over an area, reduced over time and member
+    (one map per model; .min("model") for the cautious view)
+  "Which day / which place?": daily values per model, or one line per place (.interp(places(…)) of hourly values)
+  A ride or hike: values along the route (.interp(route(…))), a graph over the ride with the route on a map
+A yes/no or one number needs no chart: answer in text.
+
 Examples:
 - Chance of a dry, mild ride, per model:
     ride = forecast().interp(lat=50.94, lon=6.96).sel(time=slice("2026-10-10T10:00", "2026-10-10T16:00"))

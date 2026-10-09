@@ -349,3 +349,16 @@ def test_fallback_download_counts_against_the_budget(tmp_path):
     assert budget.reserved == [result.bytes_downloaded] * 2
     # The throttled attempt is released before the repeat; the repeat counts what it downloaded.
     assert budget.settled == [(0, 0), (1, result.bytes_downloaded)]
+
+
+def test_status_reports_how_far_the_cache_reaches(source):
+    source.samples(hourly(RUN + timedelta(hours=8), 12), ["precip", "t2m"])
+    s = source.status()
+    assert s["model"] == "ecmwf-ens" and s["members"] == MEMBERS and "cape" in s["variables"]
+    assert s["domain"] == "global, served for 45–55°N, 0°E–15°E"
+    [run] = s["runs"]
+    assert run["run"] == RUN and run["reaches"] == RUN + timedelta(hours=360)
+    # From the step covering now (+6 h at +8 h) to the last one the query needed, without a gap.
+    assert run["cached"]["t2m"] == run["cached"]["precip"] == RUN + timedelta(hours=21)
+    assert run["cached"]["wind"] is None
+    assert run["cached"]["rh"] is None  # needs dew point too

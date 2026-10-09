@@ -13,10 +13,12 @@ from .tools import _forecast_summary, _run
 VIEW_URI = "ui://weather-agent/forecast.html"
 
 DESCRIPTION = (
-    "Show the user a forecast query's answer as an interactive chart, next to the answer you get. The query is the "
-    "same as for the forecast tool; the dimensions left in the answer pick the chart: time (or hour, distance "
-    "bins) gives a graph, lat × lon (an area from .sel(lat=slice(…), lon=slice(…))) a map, over time a map with "
-    "a time slider, point (places) markers on a map or one line per place. model becomes colours, member "
+    "The way to show the user a forecast: an interactive chart of a query's answer, which you also get as text "
+    "(the same answer the forecast tool gives, so don't run the query twice). Use it whenever the answer has a "
+    "shape worth seeing: hours or days at a place (a meteogram), an area (a map), places or a route compared. The "
+    "query is the same as for the forecast tool; the dimensions left in the answer pick the chart: time (or hour, "
+    "distance bins) gives a graph, lat × lon (an area from .sel(lat=slice(…), lon=slice(…))) a map, over time a "
+    "map with a time slider, point (places) markers on a map or one line per place. model becomes colours, member "
     "bands (and one thin line per member when one model is shown), quantile bands. Keep what the user should see: "
     "e.g. forecast().interp(lat=50.94, lon=6.96).sel(time=slice('2026-10-10', '2026-10-13')).t2m for every "
     "member of every model (a meteogram), or (….precip.sum('time') > 10).mean('member') over an area for a map of "
