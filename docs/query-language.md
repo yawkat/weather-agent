@@ -165,9 +165,11 @@ Apps view, `config/mcp-apps/forecast.html`), next to the answer the agent gets. 
 | `point` without an x axis | markers on a map |
 | none of these | dots and ranges per model, or a single number |
 
-Within those, `model` is colour (or one map per model), `member` thin lines (with the 10–90 % band and median the
-view draws for orientation), `quantile` bands, and `point` with an x axis one graph per place. Maps can't show
-every member: the query must reduce `member` first. Under maps lies a basemap: land, lakes, coastlines, borders,
+Within those, `model` is colour (or one map per model), `member` the 10–90 % and 25–75 % bands and median the
+view draws for orientation (one thin line per member when one model is shown), `quantile` bands, and `point` with
+an x axis one graph per place. Maps can't show every member: the query must reduce `member` first. A grid's map is
+the selected area, filled to its edges (select a larger area for more around it); maps of places and routes get
+room around them. Under maps lies a basemap: land, lakes, coastlines, borders,
 rivers and main roads from Natural Earth 1:10m (public domain), and town names from GeoNames (CC BY 4.0, towns of
 15,000 or more), with detail to the map's scale like a web map's zoom levels (`scripts/make_basemap.py`,
 `weather_core.chart.basemap`). The agent writes the query; the view only picks colours.

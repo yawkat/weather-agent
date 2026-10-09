@@ -21,7 +21,7 @@ from .expr.axes import (BINS, BOOL, HOUR, LABEL, LAT, LON, MEMBER, MODEL, POINT,
 
 # Values over all fields (about 6 bytes of JSON each).
 MAX_VALUES = 400_000
-_MAP_MARGIN = 0.5  # degrees of basemap around a map's points, at least
+_MAP_MARGIN = 0.5  # degrees of basemap around a map's places and routes, at least
 
 
 def check_type(typ: Type) -> None:
@@ -105,21 +105,39 @@ def _coord(dim: str, coord: rt.Coord, ctx: rt.Context) -> dict:
 
 
 def _map_bounds(values: list[rt.Arr]) -> tuple[float, float, float, float] | None:
-    """South, west, north, east around every mapped location (grids, points, routes), or None."""
-    lats, lons = [], []
+    """South, west, north, east of the map, or None. A grid's map is its cells, to their outer edges: the values
+    fill it, and it shows no edge but where a model has no data. Maps of places and routes only get room around
+    them, as there's nothing to fill."""
+    boxes, lats, lons = [], [], []
     for v in values:
         if LAT in v.dims and LON in v.dims:  # one of them alone is a profile (a graph), not a map
-            lats += [float(x) for x in v.coords[LAT].labels]
-            lons += [float(x) for x in v.coords[LON].labels]
+            la = [float(x) for x in v.coords[LAT].labels]
+            lo = [float(x) for x in v.coords[LON].labels]
+            hla, hlo = _half_step(la), _half_step(lo)
+            boxes.append((min(la) - hla, min(lo) - hlo, max(la) + hla, max(lo) + hlo))
         if POINT in v.dims:
             lats += [float(x) for x in v.coords[POINT].extra["lat"]]
             lons += [float(x) for x in v.coords[POINT].extra["lon"]]
         if TIME in v.dims and "lat" in v.coords[TIME].extra:
             lats += [float(x) for x in v.coords[TIME].extra["lat"]]
             lons += [float(x) for x in v.coords[TIME].extra["lon"]]
+    if boxes:
+        boxes += [(a, b, a, b) for a, b in zip(lats, lons)]  # places on a grid's map stay on it
+        return (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes),
+                max(b[3] for b in boxes))
     if not lats:
         return None
-    return min(lats), min(lons), max(lats), max(lons)
+    south, west, north, east = min(lats), min(lons), max(lats), max(lons)
+    # At least half a degree, so a single place still shows where it is.
+    margin = max(_MAP_MARGIN, 0.15 * max(north - south, east - west))
+    return south - margin, west - margin, north + margin, east + margin
+
+
+def _half_step(axis: list[float]) -> float:
+    """Half a grid cell along an axis: half its smallest step, or half a tenth of a degree for a single row (as
+    the view draws it)."""
+    steps = [abs(b - a) for a, b in zip(axis, axis[1:]) if b != a]
+    return min(steps) / 2 if steps else 0.05
 
 
 # The map under maps: Natural Earth 1:10m and GeoNames places, built by scripts/make_basemap.py.
@@ -140,15 +158,13 @@ def _basemap_data() -> dict[str, np.ndarray]:
 
 
 def basemap(south: float, west: float, north: float, east: float) -> dict:
-    """The map around a map's points: land and lakes as rings (cut at the box and between tiles, so only for
+    """The map of a box (see _map_bounds): land and lakes as rings (cut at the box and between tiles, so only for
     filling), lake shores, coastlines, borders, rivers and roads as lines (each
     a list of [lat, lon, lat, lon, …] in degrees), and the largest places ([lat, lon, name], largest first).
 
     Detail follows the map's scale, like a web map's zoom level: features Natural Earth shows from that zoom on,
     simplified to about half a drawing unit."""
-    # At least half a degree, so a small area or a single place still shows where it is.
-    margin = max(_MAP_MARGIN, 0.15 * max(north - south, east - west))
-    box = (south - margin, west - margin, north + margin, east + margin)
+    box = (south, west, north, east)
     k = math.cos(math.radians((box[0] + box[2]) / 2))
     degrees_per_unit = max(box[2] - box[0], (box[3] - box[1]) * k) / _MAP_WIDTH
     # Web map zoom with the same scale (256-pixel tiles of 360° of longitude at zoom 0), plus one: the map has
