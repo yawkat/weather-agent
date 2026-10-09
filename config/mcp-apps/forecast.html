@@ -28,6 +28,7 @@
   --ring: rgba(11, 11, 11, 0.10);
   --wash: rgba(11, 11, 11, 0.05);
   --night: rgba(42, 50, 90, 0.07);
+  --faint: 0.3; /* the faint part of rain bars: 9 in 10 members up to */
   --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
   --s5: #e87ba4; --s6: #008300; --s7: #4a3aa7; --s8: #e34948;
   --font: var(--font-sans, system-ui, -apple-system, "Segoe UI", sans-serif);
@@ -41,6 +42,7 @@
     --grid: #2c2c2a; --axis: #383835; --land: #c3c2b7;
     --water: #1d2731; --ground: #222221; --river: #6aa3e3; --road: #cdbca8;
     --ring: rgba(255, 255, 255, 0.10); --wash: rgba(255, 255, 255, 0.06); --night: rgba(0, 0, 0, 0.28);
+    --faint: 0.45;
     --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
     --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
   }
@@ -53,6 +55,7 @@
   --grid: #2c2c2a; --axis: #383835; --land: #c3c2b7;
     --water: #1d2731; --ground: #222221; --river: #6aa3e3; --road: #cdbca8;
   --ring: rgba(255, 255, 255, 0.10); --wash: rgba(255, 255, 255, 0.06); --night: rgba(0, 0, 0, 0.28);
+  --faint: 0.45;
   --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
   --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
 }
@@ -83,7 +86,8 @@ button { font: inherit; color: inherit; }
 .key.thin { height: 1px; opacity: 0.5; }
 .key.dot { width: 8px; height: 8px; border-radius: 50%; }
 .key.bar { width: 8px; height: 10px; border-radius: 1px; opacity: 0.9; }
-.key.bar.faint { opacity: 0.3; }
+.key.bar.faint { opacity: var(--faint); }
+.key + .key { margin-left: -2px; }
 .key.night { width: 12px; height: 10px; border-radius: 2px; background: var(--night); box-shadow: inset 0 0 0 1px var(--ring); }
 svg text.now { fill: var(--ink-2); font-size: 10px; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--ink-2); font-size: 12px; margin: 6px 0 2px; }
@@ -521,10 +525,13 @@ function chip(parent, label, pressed, onClick, model) {
   return button;
 }
 
+// A legend entry: one key, or several (classes as a list) for one meaning drawn several ways.
 function legendItem(parent, color, cls, text) {
   const item = html("span", {}, parent);
-  const key = html("span", { class: `key ${cls}` }, item);
-  key.style.color = color;
+  for (const c of Array.isArray(cls) ? cls : [cls]) {
+    const key = html("span", { class: `key ${c}` }, item);
+    key.style.color = color;
+  }
   item.appendChild(document.createTextNode(text));
 }
 
@@ -652,6 +659,15 @@ function renderGraphs(body, graphs) {
     const [first, last] = extent(a.positions);
     ranges[a.dim] = [Math.min(r[0], first), Math.max(r[1], last + spanOf(a))];
   }
+  const width = Math.max(document.getElementById("body").clientWidth, 280);
+  // Bars need about 3 px per model and bucket; narrower, the models' bars are a comb nobody can read, and they
+  // become steps: the median and, thin, the 9-in-10 level of each model.
+  axes.forEach((a, i) => {
+    if (!a.bars) return;
+    const [x0, x1] = ranges[a.dim];
+    const px = ((width - MARGIN.l - MARGIN.r) * a.width) / ((x1 - x0) || 1);
+    a.steps = px / shownModels(graphs[i]).length < 3;
+  });
   const legend = html("div", { class: "legend" }, body);
   const lines = graphs.filter((f, i) => !axes[i].bars);
   const bars = graphs.filter((f, i) => axes[i].bars);
@@ -664,11 +680,15 @@ function renderGraphs(body, graphs) {
   } else if (anyQuantile) {
     legendItem(legend, "var(--ink-2)", "band", "quantile range");
   }
-  if (anyMembers || anyQuantile) legendItem(legend, "var(--ink-2)", "", "median");
-  if (bars.some((f) => f.has("member") || f.has("quantile"))) {
-    legendItem(legend, "var(--ink-2)", "bar", "median");
-    legendItem(legend, "var(--ink-2)", "bar faint", bars.some((f) => f.has("member")) ? "9 in 10 members up to"
-      : "highest quantile");
+  // One entry per meaning, with a key for each way it's drawn.
+  const spread = (f) => f.has("member") || f.has("quantile");
+  const barSpread = graphs.some((f, i) => axes[i].bars && !axes[i].steps && spread(f));
+  const stepSpread = graphs.some((f, i) => axes[i].bars && axes[i].steps && spread(f));
+  const medianKeys = [...(anyMembers || anyQuantile || stepSpread ? [""] : []), ...(barSpread ? ["bar"] : [])];
+  if (medianKeys.length) legendItem(legend, "var(--ink-2)", medianKeys, "median");
+  if (barSpread || stepSpread) {
+    legendItem(legend, "var(--ink-2)", [...(barSpread ? ["bar faint"] : []), ...(stepSpread ? ["thin"] : [])],
+      bars.some((f) => f.has("member")) ? "9 in 10 members up to" : "highest quantile");
   }
   if (graphs.some((f, i) => axes[i].time && sunPlace(f, 0, axes[i]))) legendItem(legend, "", "night", "night");
   if (anyMembers) {
@@ -680,7 +700,10 @@ function renderGraphs(body, graphs) {
     button.classList.add("toggle");
   }
   if (!legend.childNodes.length) legend.remove();
-  const width = Math.max(document.getElementById("body").clientWidth, 280);
+  // Inline, compact; in fullscreen, the graphs share the screen's height.
+  const panels = graphs.reduce((n, f) => n + (f.has("point") ? f.size("point") : 1), 0);
+  const plot = hostContext.displayMode === "fullscreen"
+    ? Math.max(120, Math.min(320, Math.floor((window.innerHeight - 220) / panels) - 50)) : 120;
   let first = true;
   graphs.forEach((f, i) => {
     const places = f.has("point") ? f.size("point") : 1;
@@ -692,7 +715,7 @@ function renderGraphs(body, graphs) {
       label.appendChild(document.createTextNode(`${f.unit && !f.percent ? ` ${f.unit}` : ""}`));
       if (f.has("point")) head.appendChild(document.createTextNode(placeName(f, p)));
       const top = first && axes[i].time ? MARGIN.t + TOP_AXIS : MARGIN.t;
-      const height = 120 + top + MARGIN.b;
+      const height = plot + top + MARGIN.b;
       const svg = el("svg", { viewBox: `0 0 ${width} ${height}`, height, tabindex: 0, role: "img",
         "aria-label": `${fieldLabel(f)} graph; use the arrow keys to read values` }, panel);
       const frame = { width, height, top, axis: axes[i], range: ranges[axes[i].dim], topAxis: first && axes[i].time };
@@ -853,7 +876,8 @@ function drawGraph(svg, f, place, frame) {
 
   const marks = el("g", {}, svg);
   const single = series.length === 1;
-  if (axis.bars) drawBars(marks, axis, series, x, y);
+  if (axis.bars && axis.steps) drawSteps(marks, axis, series, x, y);
+  else if (axis.bars) drawBars(marks, axis, series, x, y);
   else for (const s of series) {
     for (const [low, high] of s.bands) band(marks, axis, low, high, x, y, s.color, single ? 0.22 : 0.12);
     if (memberLinesOf(f)) for (const row of s.members) line(marks, axis, row, x, y, s.color, 1, single ? 0.22 : 0.1);
@@ -951,20 +975,48 @@ function drawBars(parent, axis, series, x, y) {
   const zero = y(0);
   axis.positions.forEach((p, i) => {
     const left = x(p);
-    const right = x(p + axis.width);
+    const right = x(bucketEnd(axis, i));
     const gap = Math.min(1.5, (right - left) * 0.15);
     const slot = (right - left - 2 * gap) / n;
     series.forEach((s, k) => {
       const bx = left + gap + k * slot;
       const bw = Math.max(1, slot - (n > 1 ? Math.min(1, slot * 0.2) : 0));
-      for (const [row, opacity] of [[s.faint, 0.3], [s.solid, 0.9]]) {
+      for (const [row, opacity] of [[s.faint, "var(--faint)"], [s.solid, "0.9"]]) {
         const v = row ? row[i] : null;
         if (v === null || v <= 0) continue;
+        // As a style, so the faint part can be stronger on dark ground.
         el("rect", { x: bx.toFixed(1), y: y(v).toFixed(1), width: bw.toFixed(1), height: Math.max(0.5, zero - y(v)).toFixed(1),
-          fill: s.color, "fill-opacity": opacity }, parent);
+          fill: s.color, style: `fill-opacity: ${opacity}` }, parent);
       }
     });
   });
+}
+
+// Bars too narrow to tell apart, as steps over each bucket: the median in the model's line style, and thin the
+// 9-in-10 level (or highest quantile).
+function drawSteps(parent, axis, series, x, y) {
+  for (const s of series) {
+    for (const [row, width, opacity, dash] of [[s.faint, 1, "var(--faint)", null], [s.solid, 2, "1", dashOf(s.model)]]) {
+      if (!row) continue;
+      const points = [];
+      row.forEach((v, i) => {
+        if (v === null) { points.push(null); return; }
+        points.push([x(axis.positions[i]), y(v)], [x(bucketEnd(axis, i)), y(v)]);
+      });
+      const d = pathOf(points);
+      if (!d) continue;
+      el("path", { d, fill: "none", stroke: s.color, "stroke-width": width, style: `stroke-opacity: ${opacity}`,
+        "stroke-linejoin": "round", ...(dash ? { "stroke-dasharray": dash[0] } : {}) }, parent);
+    }
+  }
+}
+
+// Where the bucket of position i ends: at the next one when it follows on, as days around a change of daylight
+// saving time have 23 or 25 hours; else (the last, or after a gap) a step on.
+function bucketEnd(axis, i) {
+  const p = axis.positions[i];
+  const next = axis.positions[i + 1];
+  return next !== undefined && next > p && next - p <= axis.width * 1.5 ? next : p + axis.width;
 }
 
 // Points along x: hourly values at their label; coarser steps (resampled) hold over their bucket.
@@ -973,7 +1025,7 @@ function pts(axis, values, x, y) {
   values.forEach((v, i) => {
     if (v === null) { out.push(null); return; }
     const p = axis.positions[i];
-    if (axis.time && axis.width > 60) out.push([x(p), y(v)], [x(p + axis.width), y(v)]);
+    if (axis.time && axis.width > 60) out.push([x(p), y(v)], [x(bucketEnd(axis, i)), y(v)]);
     else if (!axis.time) out.push([x(p + axis.width / 2), y(v)]);
     else out.push([x(p), y(v)]);
   });
