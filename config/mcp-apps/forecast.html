@@ -376,8 +376,9 @@ function prepareField(f) {
   const percent = !yesno && f.unit === "" && values.length > 0 && values.every((v) => v >= 0 && v <= 1);
   // Amounts can go negative only as differences (between models, over time), which aren't amounts to draw as such.
   const negative = values.some((v) => v < 0);
+  const over360 = values.some((v) => v > 360);
   return {
-    ...f, sizes, strides, percent, yesno, negative,
+    ...f, sizes, strides, percent, yesno, negative, over360,
     // pin: the map cell ({ lat, lon } indices) whose forecast over time shows under the maps.
     view: { timeIndex: 0, quantile: null, pin: null },
     has: (d) => f.dims.includes(d),
@@ -400,7 +401,9 @@ function quantityOf(f) {
     case "mm/h": case "mm": return f.negative ? null : "precip";
     case "°C": return "temperature";
     case "km/h": return "wind";
-    case "°": return "direction";
+    // A direction lies in 0…360; a change of one (diff) goes negative, and a named field of degrees that isn't
+    // called a direction is likely a spread (std). An unnamed std still looks like a direction: only the query knows.
+    case "°": return !f.negative && !f.over360 && (!f.name || /dir/i.test(f.name)) ? "direction" : null;
     case "W/m²": case "J/kg": return "energy";
     case "%": return /cloud/i.test(f.name || "") ? "cloud" : null;
     default: return null;
@@ -1577,7 +1580,7 @@ function renderPin(box, f, unpin) {
   const [first, last] = extent(axis.positions);
   const range = [first, last + spanOf(axis)];
   if (axis.bars) axis.steps = barsTooNarrow(axis, range, width, shownModels(g).length);
-  const height = 120 + MARGIN.t + MARGIN.b;
+  const height = (axis.arrows ? ARROW_ROW * shownModels(g).length : 120) + MARGIN.t + MARGIN.b;
   const svg = el("svg", { viewBox: `0 0 ${width} ${height}`, height, tabindex: 0, role: "img",
     "aria-label": `${fieldLabel(f)} at ${label}; use the arrow keys to read values` }, panel);
   drawGraph(svg, g, 0, { width, height, top: MARGIN.t, axis, range, topAxis: false });
@@ -1860,6 +1863,10 @@ function renderDots(body, f) {
     html("div", { class: "stat" }, body, fmtValue(f, f.data[0]));
     return;
   }
+  if (quantityOf(f) === "direction") {
+    renderDirectionDots(body, f);
+    return;
+  }
   const models = shownModels(f);
   const places = f.has("point") ? f.size("point") : 1;
   const rows = [];
@@ -1922,6 +1929,48 @@ function renderDots(body, f) {
       el("circle", { cx: x(r.marks.mid), cy, r: 5, fill: color, stroke: "var(--surface)", "stroke-width": 2 }, svg);
       el("text", { x: Math.min(x(r.marks.mid) + 9, width - 60), y: cy - 7 }, svg).textContent = fmtValue(f, r.marks.mid);
     }
+  });
+}
+
+// Directions without an axis: per place and model, an arrow the way the wind blows and the value, as on graphs
+// (members' circular mean, faint where they disagree, and their spread); a linear axis would put 350° and 10° at
+// its two ends.
+function renderDirectionDots(body, f) {
+  const rows = [];
+  const places = f.has("point") ? f.size("point") : 1;
+  for (let p = 0; p < places; p++) {
+    for (const model of shownModels(f)) {
+      const index = { point: p, ...modelAt(f, model) };
+      let s;
+      if (f.has("member")) {
+        const members = Array.from({ length: f.size("member") }, (_, m) => [f.at({ ...index, member: m })]);
+        s = directionsOf({ members, bands: [], median: null });
+      } else if (f.has("quantile")) {
+        const levels = f.coords.quantile.values;
+        const median = levels.indexOf(0.5);
+        s = { median: [f.at({ ...index, quantile: median >= 0 ? median : 0 })], agree: null, spread: null };
+      } else {
+        s = { median: [f.at(index)], agree: null, spread: null };
+      }
+      const name = [f.has("point") ? placeName(f, p) : "", model !== undefined ? modelName(model) : ""]
+        .filter(Boolean).join(" · ") || fieldLabel(f);
+      rows.push({ name, model, s });
+    }
+  }
+  const width = Math.max(280, Math.min(document.getElementById("body").clientWidth, 720));
+  const labelW = Math.min(150, width * 0.35);
+  const rowH = 26;
+  const panel = html("div", { class: "panel" }, body);
+  const svg = el("svg", { viewBox: `0 0 ${width} ${rows.length * rowH}`, height: rows.length * rowH, role: "img",
+    "aria-label": `${fieldLabel(f)} per model` }, panel);
+  rows.forEach((r, i) => {
+    const cy = i * rowH + rowH / 2;
+    el("text", { x: 0, y: cy + 4, class: "place" }, svg).textContent = r.name.length > 24 ? `${r.name.slice(0, 23)}…` : r.name;
+    const v = r.s.median[0];
+    if (v === null || v === undefined) return;
+    arrow(svg, labelW + 10, cy, v, 1, colorOf(r.model), r.s.agree ? 0.2 + 0.8 * r.s.agree[0] : 1);
+    const spread = r.s.spread && r.s.spread[0] !== null ? ` · spread ±${Math.round(r.s.spread[0])}°` : "";
+    el("text", { x: labelW + 26, y: cy + 4, class: "place" }, svg).textContent = `${fmtValue(f, v)}${spread}`;
   });
 }
 
