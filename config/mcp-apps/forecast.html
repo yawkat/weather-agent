@@ -358,8 +358,10 @@ function prepareField(f) {
   // Conditions left unreduced are yes/no; unitless numbers within 0…1 (a condition's mean) are probabilities.
   const yesno = f.kind === "condition";
   const percent = !yesno && f.unit === "" && values.length > 0 && values.every((v) => v >= 0 && v <= 1);
+  // Amounts can go negative only as differences (between models, over time), which aren't amounts to draw as such.
+  const negative = values.some((v) => v < 0);
   return {
-    ...f, sizes, strides, percent, yesno,
+    ...f, sizes, strides, percent, yesno, negative,
     view: { timeIndex: 0, quantile: null },
     has: (d) => f.dims.includes(d),
     size: (d) => sizes[f.dims.indexOf(d)] || 1,
@@ -377,7 +379,8 @@ function quantityOf(f) {
   if (f.yesno) return "condition";
   if (f.percent) return "probability";
   switch (f.unit) {
-    case "mm/h": case "mm": return "precip";
+    // A difference of precipitation (negative somewhere) is lines and a diverging map, not bars and dry cells.
+    case "mm/h": case "mm": return f.negative ? null : "precip";
     case "°C": return "temperature";
     case "km/h": return "wind";
     case "W/m²": case "J/kg": return "energy";
