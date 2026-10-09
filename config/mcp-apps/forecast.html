@@ -80,6 +80,8 @@ button { font: inherit; color: inherit; }
 .key.band { height: 8px; opacity: 0.25; border-radius: 2px; }
 .key.thin { height: 1px; opacity: 0.5; }
 .key.dot { width: 8px; height: 8px; border-radius: 50%; }
+.key.bar { width: 8px; height: 10px; border-radius: 1px; opacity: 0.9; }
+.key.bar.faint { opacity: 0.3; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--ink-2); font-size: 12px; margin: 6px 0 2px; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .panel { margin-top: 10px; }
@@ -369,6 +371,24 @@ function prepareField(f) {
   };
 }
 
+// What a field measures, from its unit (and name): picks bars or lines and the map's colours. The unit follows
+// the query's arithmetic, so precip.sum("time") is still precipitation (mm).
+function quantityOf(f) {
+  if (f.yesno) return "condition";
+  if (f.percent) return "probability";
+  switch (f.unit) {
+    case "mm/h": case "mm": return "precip";
+    case "°C": return "temperature";
+    case "km/h": return "wind";
+    case "W/m²": case "J/kg": return "energy";
+    case "%": return /cloud/i.test(f.name || "") ? "cloud" : null;
+    default: return null;
+  }
+}
+
+// Precipitation counts as wet from 0.1 mm/h (or mm, summed).
+const WET = 0.1;
+
 function coordSize(dim, c) {
   if (dim === "time") return c.minutes.length;
   if (dim === "point") return c.lat.length;
@@ -447,7 +467,7 @@ function fmtValue(f, v) {
   if (f.yesno) return v >= 0.5 ? "yes" : "no";
   if (f.percent) return `${Math.round(v * 100)} %`;
   const a = Math.abs(v);
-  const digits = a >= 100 ? 0 : a >= 10 ? 1 : a >= 1 ? 1 : 2;
+  const digits = a >= 100 || a === 0 ? 0 : a >= 10 ? 1 : a >= 1 ? 1 : 2;
   return `${v.toFixed(digits)}${f.unit ? ` ${f.unit}` : ""}`;
 }
 
@@ -590,15 +610,18 @@ let hoverX = null;
 function xAxisOf(f) {
   const d = X_DIMS.find((x) => f.has(x));
   const c = f.coords[d];
+  // Precipitation over buckets (hours, resampled steps, hours of the day, bins) is a bar per bucket: each sample
+  // stands for the interval starting at its label.
+  const bars = quantityOf(f) === "precip";
   if (d === "time") {
     const step = stepMinutes(c.step);
-    return { dim: d, positions: c.minutes, width: step, time: true, route: c.lat ? c : null };
+    return { dim: d, positions: c.minutes, width: step, time: true, route: c.lat ? c : null, bars: bars && step > 0 };
   }
-  if (d === "hour") return { dim: d, positions: c.values, width: 1, labels: c.values.map((h) => `${h}:00`) };
+  if (d === "hour") return { dim: d, positions: c.values, width: 1, labels: c.values.map((h) => `${h}:00`), bars };
   if (d === "lat" || d === "lon") {
     return { dim: d, positions: c.values, width: 0, labels: c.values.map((v) => `${+v.toFixed(2)}°${d === "lat" ? "N" : "E"}`) };
   }
-  return { dim: d, positions: c.labels.map((_, i) => i), width: 1, labels: c.labels };
+  return { dim: d, positions: c.labels.map((_, i) => i), width: 1, labels: c.labels, bars };
 }
 
 function renderGraphs(body, graphs) {
@@ -615,11 +638,18 @@ function renderGraphs(body, graphs) {
     ranges[a.dim] = [Math.min(r[0], first), Math.max(r[1], last + spanOf(a))];
   }
   const legend = html("div", { class: "legend" }, body);
-  const anyMembers = graphs.some((f) => f.has("member"));
-  const anyQuantile = graphs.some((f) => f.has("quantile"));
+  const lines = graphs.filter((f, i) => !axes[i].bars);
+  const bars = graphs.filter((f, i) => axes[i].bars);
+  const anyMembers = lines.some((f) => f.has("member"));
+  const anyQuantile = lines.some((f) => f.has("quantile"));
   if (anyMembers) legendItem(legend, "var(--ink-2)", "thin", "one line per member");
   if (anyMembers || anyQuantile) legendItem(legend, "var(--ink-2)", "band", anyMembers ? "10–90 % of members" : "quantile range");
   if (anyMembers || anyQuantile) legendItem(legend, "var(--ink-2)", "", "median");
+  if (bars.some((f) => f.has("member") || f.has("quantile"))) {
+    legendItem(legend, "var(--ink-2)", "bar", "median");
+    legendItem(legend, "var(--ink-2)", "bar faint", bars.some((f) => f.has("member")) ? "9 in 10 members up to"
+      : "highest quantile");
+  }
   if (!legend.childNodes.length) legend.remove();
   const width = Math.max(document.getElementById("body").clientWidth, 280);
   let first = true;
@@ -694,10 +724,12 @@ function drawGraph(svg, f, place, frame) {
   const x = (t) => MARGIN.l + ((t - x0) / (x1 - x0 || 1)) * (width - MARGIN.l - MARGIN.r);
   const models = shownModels(f);
   const series = models.map((m) => ({ model: m, color: colorOf(m), ...seriesOf(f, place, m) }));
+  if (axis.bars) for (const s of series) Object.assign(s, barsOf(s));
   let lo = Infinity;
   let hi = -Infinity;
   for (const s of series) {
-    for (const row of [...s.members, ...s.bands.flat(), s.median || []]) {
+    const rows = axis.bars ? [s.solid, s.faint || []] : [...s.members, ...s.bands.flat(), s.median || []];
+    for (const row of rows) {
       for (const v of row) {
         if (v === null) continue;
         lo = Math.min(lo, v);
@@ -707,6 +739,7 @@ function drawGraph(svg, f, place, frame) {
   }
   if (!isFinite(lo)) { lo = 0; hi = 1; }
   if (f.percent || f.yesno) { lo = 0; hi = Math.max(hi, 1); }
+  if (axis.bars) lo = Math.min(lo, 0); // bars stand on 0
   // Amounts start the axis at 0 when they come close; temperatures and directions have no such zero.
   if (lo > 0 && lo < (hi - lo) * 0.5 && !NO_ZERO_UNITS.includes(f.unit)) lo = 0;
   if (hi - lo < 1e-9) hi = lo + 1;
@@ -760,7 +793,8 @@ function drawGraph(svg, f, place, frame) {
 
   const marks = el("g", {}, svg);
   const single = series.length === 1;
-  for (const s of series) {
+  if (axis.bars) drawBars(marks, axis, series, x, y);
+  else for (const s of series) {
     for (const [low, high] of s.bands) band(marks, axis, low, high, x, y, s.color, single ? 0.22 : 0.12);
     for (const row of s.members) line(marks, axis, row, x, y, s.color, 1, single ? 0.22 : 0.1);
     if (s.median) line(marks, axis, s.median, x, y, s.color, 2, 1, dashOf(s.model));
@@ -775,12 +809,49 @@ function drawGraph(svg, f, place, frame) {
 // How far along x one position reaches: hourly values sit at their label; coarser steps (resampled) and bins
 // hold over their bucket.
 function spanOf(axis) {
-  return axis.time && axis.width <= 60 ? 0 : axis.width;
+  return axis.time && axis.width <= 60 && !axis.bars ? 0 : axis.width;
 }
 
 // Where along x the value of a position is read: the middle of its bucket.
 function centreOf(axis, p) {
   return p + spanOf(axis) / 2;
+}
+
+// A bar series: solid to the median (or the value, or the lowest quantile when there's no median), faint to the
+// 90th percentile of members (or the highest quantile); for members also the share of wet ones. Spaghetti would
+// hide that most members are dry while a few are wet.
+function barsOf(s) {
+  if (s.members.length) {
+    const wet = s.median.map((_, i) => {
+      const column = s.members.map((row) => row[i]).filter((v) => v !== null);
+      return column.length ? column.filter((v) => v >= WET).length / column.length : null;
+    });
+    return { solid: s.median, faint: s.bands[0][1], wet };
+  }
+  if (s.bands.length) return { solid: s.median || s.bands[0][0], faint: s.bands[0][1], wet: null };
+  return { solid: s.median, faint: null, wet: null };
+}
+
+// Bars per bucket, the models side by side in their fixed order (which, with colour, tells them apart).
+function drawBars(parent, axis, series, x, y) {
+  const n = series.length;
+  const zero = y(0);
+  axis.positions.forEach((p, i) => {
+    const left = x(p);
+    const right = x(p + axis.width);
+    const gap = Math.min(1.5, (right - left) * 0.15);
+    const slot = (right - left - 2 * gap) / n;
+    series.forEach((s, k) => {
+      const bx = left + gap + k * slot;
+      const bw = Math.max(1, slot - (n > 1 ? Math.min(1, slot * 0.2) : 0));
+      for (const [row, opacity] of [[s.faint, 0.3], [s.solid, 0.9]]) {
+        const v = row ? row[i] : null;
+        if (v === null || v <= 0) continue;
+        el("rect", { x: bx.toFixed(1), y: y(v).toFixed(1), width: bw.toFixed(1), height: Math.max(0.5, zero - y(v)).toFixed(1),
+          fill: s.color, "fill-opacity": opacity }, parent);
+      }
+    });
+  });
 }
 
 // Points along x: hourly values at their label; coarser steps (resampled) hold over their bucket.
@@ -891,18 +962,20 @@ function setGraphHover(position, entry, clientY) {
   for (const s of entry.series) {
     const median = s.median ? s.median[i] : null;
     const range = s.bands.length ? [s.bands[0][0][i], s.bands[0][1][i]] : null;
-    tooltipRow(tooltip, s.model, entry.field, median, range, s.model !== undefined ? modelName(s.model) : "");
+    const wet = s.wet && s.wet[i] !== null ? `${Math.round(s.wet[i] * 100)} % wet` : "";
+    tooltipRow(tooltip, s.model, entry.field, median, range, s.model !== undefined ? modelName(s.model) : "", wet);
   }
   placeTooltip(entry.svg, entry.x(centreOf(entry.axis, position)), clientY);
 }
 
-function tooltipRow(parent, model, f, value, range, what) {
+function tooltipRow(parent, model, f, value, range, what, note) {
   const row = html("div", { class: "row" }, parent);
   modelKey(row, model);
   html("strong", {}, row, fmtValue(f, value));
   if (range && range[0] !== null && range[1] !== null) {
     html("span", { class: "range" }, row, `${fmtValue(f, range[0])}–${fmtValue(f, range[1])}`);
   }
+  if (note) html("span", { class: "range" }, row, note);
   if (what) html("span", { class: "what" }, row, what);
 }
 
@@ -1032,51 +1105,71 @@ function pathOfRings(rings, p) {
   return (rings || []).map((r) => `${pathOfCoords(r, p)}Z`).join("");
 }
 
-// Sequential (one hue) for magnitudes; diverging around 0 for values on both sides. In light mode small values
-// recede toward the light surface, in dark mode toward the dark one: the same steps, reversed.
-const SEQ = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"];
+// Sequential (one hue) for magnitudes, the hue by quantity; diverging around 0 for temperatures (0 °C: freezing)
+// and other values on both sides. In light mode small values recede toward the light surface, in dark mode toward
+// the dark one: the same steps, reversed.
+const SEQ = {
+  blue: ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"],
+  violet: ["#e6e3f8", "#c9c2f0", "#a89de6", "#8677d9", "#6656c4", "#4a3aa7", "#2f2475"],
+  orange: ["#fde4cf", "#fbc49b", "#f5a066", "#eb6834", "#c8501f", "#9a3c15", "#6b290d"],
+  grey: ["#ecebe6", "#d6d5ce", "#bdbcb3", "#a3a299", "#898781", "#6c6b66", "#52514e"],
+};
+const SEQ_HUE = { precip: "blue", probability: "blue", wind: "violet", energy: "orange", cloud: "grey" };
 // Both arms end in the neutral midpoint, so 0 is grey and not light blue or light red; the poles stand out
 // from the surface in either mode.
-const RAMPS = {
-  light: { seq: SEQ, neg: ["#0d366b", "#256abf", "#6da7ec", "#cde2fb", "#f0efec"],
+const DIVERGING = {
+  light: { neg: ["#0d366b", "#256abf", "#6da7ec", "#cde2fb", "#f0efec"],
     pos: ["#f0efec", "#fbd5cd", "#ef8f7d", "#d4483b", "#8f1d1b"] },
-  dark: { seq: [...SEQ].reverse(), neg: ["#cde2fb", "#6da7ec", "#256abf", "#184f95", "#383835"],
+  dark: { neg: ["#cde2fb", "#6da7ec", "#256abf", "#184f95", "#383835"],
     pos: ["#383835", "#8f1d1b", "#d4483b", "#ef8f7d", "#fbd5cd"] },
 };
+// Precipitation classes (mm/h or mm), as on weather maps: finer where most of it falls. Below the first, no fill.
+const PRECIP_BOUNDS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500];
 
 function isDark() {
   return getComputedStyle(document.documentElement).colorScheme.includes("dark");
 }
 
 // Classes with round bounds, one colour each: a value reads off the legend, and maps compare class by class.
-// yes/no gets two classes; a range across 0 gets a diverging scale with 0 as a bound.
+// Colours "none" leave the basemap visible: dry, unlikely, clear sky. Values below the first bound take the first
+// class, except for precipitation (dry: none).
 function colorScale(f, lo, hi) {
-  const r = RAMPS[isDark() ? "dark" : "light"];
+  const dark = isDark();
+  const q = quantityOf(f);
+  const seq = (hue) => (dark ? [...SEQ[hue]].reverse() : SEQ[hue]);
+  const spread = (stops, n) => Array.from({ length: n }, (_, i) => ramp(stops, n > 1 ? i / (n - 1) : 0.5));
   let bounds;
   let colors;
-  if (f.yesno) {
+  let below = null;
+  if (q === "condition") {
     bounds = [0, 0.5, 1];
-    colors = [ramp(r.seq, 0.1), ramp(r.seq, 0.9)];
-  } else if (lo < 0 && hi > 0) {
-    const half = classBounds(0, Math.max(-lo, hi), 3);
-    const m = half[half.length - 1];
-    const step = half[1] - half[0];
-    // Symmetric in colour, so the same distance from 0 is as strong on both sides; but only as far as the
-    // values go on each side.
-    bounds = [...half.filter((v) => v > 0 && v - step < -lo).reverse().map((v) => -v),
-      ...half.filter((v) => v - step < hi)];
-    // The classes next to 0 are a step off neutral, the outermost at the poles.
-    colors = bounds.slice(1).map((b, i) => {
-      const mid = (bounds[i] + b) / 2;
-      const t = Math.abs(mid) / (m - step / 2);
-      return mid < 0 ? ramp(r.neg, 1 - t) : ramp(r.pos, t);
+    colors = [ramp(seq("blue"), 0.1), ramp(seq("blue"), 0.9)];
+  } else if (q === "precip") {
+    const last = PRECIP_BOUNDS.findIndex((b) => b >= hi);
+    bounds = PRECIP_BOUNDS.slice(0, Math.max(3, last < 0 ? PRECIP_BOUNDS.length : last + 1));
+    colors = spread(seq("blue"), bounds.length - 1);
+    below = "none";
+  } else if (q === "probability" || q === "cloud") {
+    // Up to 10 % (20 % cloud): no fill.
+    bounds = q === "cloud" ? classBounds(0, 100, 5) : classBounds(0, 1, 10);
+    colors = ["none", ...spread(seq(SEQ_HUE[q]).slice(1), bounds.length - 2)];
+  } else if (q === "temperature" || (lo < 0 && hi > 0)) {
+    // 0 is a bound when the values cross it. Colour by distance from 0, the same on both sides, from a step off
+    // neutral to the poles, over the classes there are: a summer map spans the red arm, not just its end.
+    bounds = classBounds(lo, hi, q === "temperature" ? 8 : 6); // a degree or two per class reads as a gradient
+    const mids = bounds.slice(1).map((b, i) => (bounds[i] + b) / 2);
+    const [near, far] = extent(mids.map(Math.abs));
+    const d = DIVERGING[dark ? "dark" : "light"];
+    colors = mids.map((mid) => {
+      const t = 0.2 + 0.8 * (Math.abs(mid) - near) / ((far - near) || 1);
+      return mid < 0 ? ramp(d.neg, 1 - t) : ramp(d.pos, t);
     });
   } else {
-    bounds = f.percent ? classBounds(0, 1, 5) : classBounds(lo, hi, 6);
-    const n = bounds.length - 1;
-    colors = bounds.slice(1).map((_, i) => ramp(r.seq, n > 1 ? i / (n - 1) : 0.5));
+    bounds = classBounds(lo, hi, 6);
+    colors = spread(seq(SEQ_HUE[q] || "blue"), bounds.length - 1);
   }
   const color = (v) => {
+    if (below !== null && v < bounds[0]) return below;
     let i = 0;
     while (i < colors.length - 1 && v >= bounds[i + 1]) i++;
     return colors[i];
@@ -1120,7 +1213,8 @@ function scaleLegend(parent, f, scale) {
   const pad = 14;
   const w = (width - 2 * pad) / n;
   scale.colors.forEach((c, i) => {
-    el("rect", { x: pad + i * w, y: 0, width: Math.max(1, w - 1), height: 8, fill: c }, svg);
+    el("rect", { x: pad + i * w, y: 0, width: Math.max(1, w - 1), height: 8, fill: c,
+      ...(c === "none" ? { stroke: "var(--axis)", x: pad + i * w + 0.5, y: 0.5, width: Math.max(1, w - 2), height: 7 } : {}) }, svg);
   });
   if (f.yesno) {
     ["no", "yes"].forEach((t, i) => {
@@ -1224,8 +1318,10 @@ function drawMapLayer(layer, labels, f, model, p, scale) {
       if (v === null) return;
       const x0 = p.x(lon - dLon / 2);
       const y0 = p.y(lat + dLat / 2);
+      // Unfilled cells (dry, unlikely) still show their value on hover.
       const rect = el("rect", { x: x0, y: y0, width: p.x(lon + dLon / 2) - x0 + 0.5,
-        height: p.y(lat - dLat / 2) - y0 + 0.5, fill: scale.color(v), "fill-opacity": 0.85 }, layer);
+        height: p.y(lat - dLat / 2) - y0 + 0.5, fill: scale.color(v), "fill-opacity": 0.85,
+        "pointer-events": "all" }, layer);
       cellHover(rect, f, v, `${lat.toFixed(2)}, ${lon.toFixed(2)}`, model);
     }));
     return;
@@ -1235,7 +1331,8 @@ function drawMapLayer(layer, labels, f, model, p, scale) {
     const v = f.at({ ...index, point: i });
     const cx = p.x(c.lon[i]);
     const cy = p.y(lat);
-    const dot = el("circle", { cx, cy, r: 7, fill: v === null ? "var(--surface)" : scale.color(v),
+    const fill = v === null ? "none" : scale.color(v);
+    const dot = el("circle", { cx, cy, r: 7, fill: fill === "none" ? "var(--surface)" : fill,
       stroke: "var(--ink)", "stroke-width": 1 }, layer);
     cellHover(dot, f, v, placeName(f, i), model);
     el("text", { x: cx + 10, y: cy + 4, class: "place" }, labels).textContent =
