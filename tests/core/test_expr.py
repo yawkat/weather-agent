@@ -308,10 +308,13 @@ def test_charts_know_what_fields_measure():
                          '"wettest": wx.precip.max("member").resample(time="1D").max(), '
                          '"difference": wx.precip.sel(model="synthetic") - wx.precip.mean("model"), '
                          '"spread": wx.precip.std("member"), "warm": wx.t2m.where(wx.t2m > 0, 0).mean("member"), '
-                         '"warmest": wx.t2m.sum("time"), "p": (wx.precip > 0.1).mean("member")}') == {
+                         '"warmest": wx.t2m.sum("time"), "p": (wx.precip > 0.1).mean("member"), '
+                         '"half": wx.precip.sum("time") / 2, "scaled": 0.5 * wx.precip.median("member"), '
+                         '"ratio": wx.precip.mean("member") / wx.precip.max("member")}') == {
         "rain": ("precip", False), "rate": ("precip", False), "wettest": ("precip", False),
         "difference": (None, False), "spread": (None, False), "warm": ("t2m", False),
-        "warmest": (None, False), "p": (None, False)}
+        "warmest": (None, False), "p": (None, False), "half": ("precip", False), "scaled": ("precip", False),
+        "ratio": (None, False)}
     assert measures(WX + 'd = wx.wind_dir\n'
                          'r = np.deg2rad(d)\n'
                          '{"mean": d.mean("member"), "spread": d.std("member"), "veer": d - d.isel(time=0), '

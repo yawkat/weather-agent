@@ -869,6 +869,7 @@ class _Compiler:
             raise _error(node, f"can't combine different time resolutions ({', '.join(sorted(flavours))}); "
                                f"resample both the same way")
         units = [p.type.unit for p in parts if p.type.unit is not None]
+        measure = None
         if unit_rule == "same":
             if len({str(u) for u in units}) > 1:
                 self.warnings.add(f"line {node.lineno}: combining values in {' and '.join(str(u) or '1' for u in units)}")
@@ -881,15 +882,18 @@ class _Compiler:
                     unit = p.type.unit if unit is None else unit * p.type.unit
             arrays = [p for p in parts if p.type.dims or not isinstance(p, Const)]
             state = len(arrays) == 1 and arrays[0].type.state
+            # Scaled by a constant, it still measures the same (half the rain is rain).
+            measure = arrays[0].type.measure if len(arrays) == 1 else None
         elif unit_rule == "div":
             a, b = parts
             unit = a.type.unit / b.type.unit if a.type.unit is not None and b.type.unit is not None else (
                 a.type.unit if b.type.unit is None else NO_UNIT / b.type.unit)
             state = a.type.state and isinstance(b, Const)
+            measure = a.type.measure if isinstance(b, Const) else None
         else:  # nonlinear: clip, where, comparisons
             unit = units[0] if units else None
             state = False
-        return Type(NUM, dims, unit, state, next(iter(flavours), None))
+        return Type(NUM, dims, unit, state, next(iter(flavours), None), measure=measure)
 
     def binop(self, node: ast.BinOp) -> Node:
         if isinstance(node.op, (ast.BitAnd, ast.BitOr)):
