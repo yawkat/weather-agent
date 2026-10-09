@@ -86,10 +86,21 @@ def test_area_is_a_map_with_coastlines_and_borders():
     lats, lons = field["coords"]["lat"]["values"], field["coords"]["lon"]["values"]
     assert len(field["data"]) == len(lats) * len(lons) > 4
     south, west, north, east = chart["basemap"]["bounds"]
-    assert south < min(lats) and north > max(lats) and west < min(lons) and east > max(lons)
+    # The map is the cells, to their outer edges: values fill it.
+    half_lat, half_lon = (lats[1] - lats[0]) / 2, (lons[1] - lons[0]) / 2
+    edges = [min(lats) - half_lat, min(lons) - half_lon, max(lats) + half_lat, max(lons) + half_lon]
+    assert [south, west, north, east] == pytest.approx(edges, abs=1e-4)
     assert chart["basemap"]["border"]  # the corner of Germany, Belgium and the Netherlands
     assert "Natural Earth" in chart["basemap"]["source"]
     assert "location" not in chart  # an area has no one place
+
+
+def test_places_get_room_around_them():
+    _, chart = forecaster().visualize(
+        'forecast().interp(lat=("point", [50.0, 50.4]), lon=("point", [7.0, 7.2]))'
+        '.sel(time=slice("2026-10-08T10:00", "2026-10-08T13:00")).t2m.mean("member").mean("time")')
+    assert chart["fields"][0]["dims"] == ["model", "point"]
+    assert chart["basemap"]["bounds"] == [49.5, 6.5, 50.9, 7.7]  # half a degree at least: nothing to fill
 
 
 def test_a_place_next_to_an_area_has_no_location():
@@ -137,7 +148,7 @@ def test_value_limit():
 
 
 def test_basemap_is_clipped_to_the_map():
-    m = basemap(49.5, 5.5, 51.5, 7.5)
+    m = basemap(49.0, 5.0, 52.0, 8.0)
     assert m["bounds"] == [49.0, 5.0, 52.0, 8.0]
     inside = lambda a, b: 49.0 <= a <= 52.0 and 5.0 <= b <= 8.0
     for name in ("lake_shore", "coastline", "border", "river_major", "river", "motorway", "road"):

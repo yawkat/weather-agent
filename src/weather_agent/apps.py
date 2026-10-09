@@ -16,13 +16,13 @@ DESCRIPTION = (
     "Show the user a forecast query's answer as an interactive chart, next to the answer you get. The query is the "
     "same as for the forecast tool; the dimensions left in the answer pick the chart: time (or hour, distance "
     "bins) gives a graph, lat × lon (an area from .sel(lat=slice(…), lon=slice(…))) a map, over time a map with "
-    "a time slider, point (places) markers on a map or one line per place. model becomes colours, member thin "
-    "lines (one per member), quantile bands. Keep what the user should see: e.g. "
-    "forecast().interp(lat=50.94, lon=6.96).sel(time=slice('2026-10-10', '2026-10-13')).t2m for every member "
-    "of every model (a meteogram), or (….precip.sum('time') > 10).mean('member') over an area for a map of the "
-    "chance of heavy rain. Maps can't show every member: reduce member first. Up to 400,000 values; the "
-    "table you get is replaced by a per-value summary when it would be longer than 500 rows. Read "
-    "weather_query_help first.")
+    "a time slider, point (places) markers on a map or one line per place. model becomes colours, member "
+    "bands (and one thin line per member when one model is shown), quantile bands. Keep what the user should see: "
+    "e.g. forecast().interp(lat=50.94, lon=6.96).sel(time=slice('2026-10-10', '2026-10-13')).t2m for every "
+    "member of every model (a meteogram), or (….precip.sum('time') > 10).mean('member') over an area for a map of "
+    "the chance of heavy rain. A map shows exactly the selected area: select a larger one for context. Maps can't "
+    "show every member: reduce member first. Up to 400,000 values; the table you get is replaced by a per-value "
+    "summary when it would be longer than 500 rows. Read weather_query_help first.")
 
 SCHEMA = json.dumps({
     "type": "object",
