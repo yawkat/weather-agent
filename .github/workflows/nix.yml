@@ -4,6 +4,9 @@ on:
   push:
     branches: [ main ]
   pull_request:
+  # The pull_request runs of PRs opened by update-flake.yml (with GITHUB_TOKEN)
+  # wait for manual approval, so it starts this explicitly for its branch.
+  workflow_dispatch:
 
 permissions:
   contents: read

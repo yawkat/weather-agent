@@ -25,6 +25,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: write
     steps:
       - uses: actions/checkout@v7
       - uses: cachix/install-nix-action@v31
@@ -34,8 +35,17 @@ jobs:
         with:
           cooldown-days: ${{ inputs.cooldown_days }}
       - uses: peter-evans/create-pull-request@v8
+        id: pr
         with:
           branch: update_flake_lock_action
           delete-branch: true
           title: flake update
           body: ${{ steps.update.outputs.body }}
+      # The push above is made with GITHUB_TOKEN, which doesn't trigger
+      # workflows. The checks of the dispatched run are reported on the
+      # branch's head commit, so they show up on the PR.
+      - name: Check the PR
+        if: steps.pr.outputs.pull-request-operation == 'created' || steps.pr.outputs.pull-request-operation == 'updated'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run nix.yml --ref update_flake_lock_action
