@@ -19,7 +19,7 @@ jobs:
   check:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # hardware acceleration for the NixOS test VM
       - name: Enable KVM
@@ -28,7 +28,7 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31
         with:
           extra_nix_config: |
             extra-substituters = file://${{ env.NIX_LOCAL_CACHE }}?trusted=1&priority=30
@@ -38,7 +38,7 @@ jobs:
       # provides GraalPy and the CLI.
       - name: Restore local binary cache
         id: restore
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ env.NIX_LOCAL_CACHE }}
           key: nix-local-${{ hashFiles('flake.lock', 'nix/**', 'pyproject.toml', 'uv.lock') }}
@@ -71,7 +71,7 @@ jobs:
 
       - name: Save local binary cache
         if: steps.restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ env.NIX_LOCAL_CACHE }}
           key: ${{ steps.restore.outputs.cache-primary-key }}
