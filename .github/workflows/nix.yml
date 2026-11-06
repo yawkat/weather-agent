@@ -47,7 +47,10 @@ jobs:
 
       - name: Initialize local binary cache
         run: |
-          mkdir -p "$NIX_LOCAL_CACHE"
+          # The directories Nix uses in a binary cache, created here so that they belong to the runner user: the nix
+          # daemon (root) creates any that are missing when it opens the cache as a substituter, and nix copy (as the
+          # runner user) then can't write into them.
+          mkdir -p "$NIX_LOCAL_CACHE"/{nar,log,realisations}
           printf 'StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 30\n' > "$NIX_LOCAL_CACHE/nix-cache-info"
 
       # Fails with a hash mismatch if nix/deps.x86_64-linux.sha256 is out of date with pyproject.toml.
@@ -58,7 +61,7 @@ jobs:
         if: steps.restore.outputs.cache-hit != 'true'
         run: |
           # Start from scratch so paths from older dependency sets don't pile up.
-          find "$NIX_LOCAL_CACHE" -mindepth 1 ! -name nix-cache-info -delete
+          find "$NIX_LOCAL_CACHE" -type f ! -name nix-cache-info -delete
           # Paths substituted from cache.nixos.org carry its signature. Anything without a real signature (locally
           # built paths only show "ultimate", fixed-output ones also a "ca:" entry) was built here or came from the
           # local cache, and is what the next run can't download. nix copy adds their closures, which a binary cache
