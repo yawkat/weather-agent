@@ -1,0 +1,75 @@
+name: Update deps hash
+
+# A flake update can change what nix/deps.nix depends on (e.g. the GraalVM version), which changes the output hash of
+# the dependency download, so the Nix check of the flake update PR fails with a hash mismatch. This builds .#deps on
+# the PR branch for each system and commits the hashes Nix reports. That push is made with GITHUB_TOKEN, which doesn't
+# trigger workflows, so the Nix check is then started explicitly for the new commit.
+on:
+  workflow_run:
+    workflows: [ Update flake ]
+    types: [ completed ]
+
+permissions:
+  contents: read
+
+jobs:
+  hash:
+    if: github.event.workflow_run.conclusion == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-26.04
+          - system: aarch64-linux
+            runner: ubuntu-26.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: update_flake_lock_action
+        continue-on-error: true  # no PR branch: nothing was updated
+        id: checkout
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31
+        if: steps.checkout.outcome == 'success'
+
+      - name: Build the dependencies
+        if: steps.checkout.outcome == 'success'
+        id: build
+        run: |
+          # Succeeds if the hash is still right; a mismatch reports the new one as "got:".
+          if nix build --no-link -L .#deps 2>&1 | tee build.log; then
+            echo "nix/deps.${{ matrix.system }}.sha256 is up to date"
+            exit 0
+          fi
+          hash=$(sed -n 's/^ *got: *\(sha256-[A-Za-z0-9+\/]*=*\)$/\1/p' build.log | head -n1)
+          if [ -z "$hash" ]; then
+            echo "::error::The dependency build failed, but not with a hash mismatch"
+            exit 1
+          fi
+          echo "$hash" > nix/deps.${{ matrix.system }}.sha256
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+
+      - name: Commit
+        if: steps.build.outputs.hash != ''
+        id: commit
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Update nix/deps.${{ matrix.system }}.sha256' -- nix/deps.${{ matrix.system }}.sha256
+          # The other system's job pushes to the same branch
+          for i in 1 2 3 4 5; do
+            git pull --rebase origin update_flake_lock_action && git push && break
+            sleep $((RANDOM % 10 + 1))
+          done
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      # The checks of the dispatched run are reported on the new commit, so they show up on the PR.
+      - name: Check the new commit
+        if: steps.commit.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run nix.yml --ref update_flake_lock_action

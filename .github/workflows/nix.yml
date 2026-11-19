@@ -4,6 +4,8 @@ on:
   push:
     branches: [ main ]
   pull_request:
+  # started by update-deps-hash.yml after it pushes updated hashes
+  workflow_dispatch:
 
 permissions:
   contents: read
